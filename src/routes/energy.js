@@ -105,11 +105,26 @@ export function createEnergyRouter(jwtSecret, sessions) {
       // since it's a separate mechanism (see purchaseEnergy's 'unlimited'
       // branch) that keeps paying off after Energy itself would otherwise
       // cap out.
+      // Both the +5 and +10 Energy packs are reserved for a low tank: the
+      // purchase is only allowed once Energy has dropped to
+      // ENERGY_PURCHASE_MAX_THRESHOLD or below (handover: "Energy needs to
+      // be 5 or below to buy 5 Energy", applies to both the 5 and 10 pack).
+      // This is strictly tighter than the full-tank guard below (since
+      // maxEnergy is always >= this threshold), but we keep the full-tank
+      // guard in place too as an explicit belt-and-suspenders check so a
+      // purchase can never slip through at a full tank even if this
+      // threshold is ever reconfigured above maxEnergy.
+      const ENERGY_PURCHASE_MAX_THRESHOLD = 5
       if (type === 'five' || type === 'ten') {
         const currentState = await settleUserEnergy(userId)
         if (currentState && currentState.energy >= currentState.maxEnergy) {
           return res.status(400).json({
             message: `Energy is already full (${currentState.maxEnergy}/${currentState.maxEnergy}) — this purchase would not add anything.`,
+          })
+        }
+        if (currentState && currentState.energy > ENERGY_PURCHASE_MAX_THRESHOLD) {
+          return res.status(400).json({
+            message: `Your Energy needs to be ${ENERGY_PURCHASE_MAX_THRESHOLD} or below to buy 5 Energy or 10 Energy (currently ${currentState.energy}/${currentState.maxEnergy}).`,
           })
         }
       }
