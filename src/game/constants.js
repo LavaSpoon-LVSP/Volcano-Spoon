@@ -647,12 +647,40 @@ export const NINJA_KNIFE_MIN_INTERVAL_MS = 1200
 // script firing inputs, not a hand on a touchscreen/mouse.
 export const MIN_HUMAN_INPUT_INTERVAL_MS = 70
 
+// FALSE-POSITIVE FIX (9 Oct 2026 staging smoke test, confirmed via live
+// anti-cheat alert log for a real, established player — see
+// inputPlausibility.js for the full writeup): each input's timestamp is
+// derived by bucketing it to its OWN frame's cumulative virtual time
+// (frameTimesMs[atFrame]), never a precise sub-frame timestamp. Two
+// genuinely separate human inputs that land in the same ~16.667ms server
+// frame (or in adjacent frames, after rounding) collapse to the SAME
+// bucketed time and measure as 0ms apart — even though the real-world gap
+// between them could have been anywhere up to one frame's duration. That
+// quantization error, not bot-speed input, is what tripped real players'
+// runs into "RESULT NOT CONFIRMED" (fastestIntervalMs: 0 in the alert log,
+// on accounts with real, non-trivial progress). One frame's worth of
+// slack absorbs that rounding error without weakening the floor itself.
+export const INPUT_RATE_FRAME_QUANTIZATION_SLACK_MS = 16.667
+
 // A raw (unclamped) drag magnitude far beyond anything the UI itself can
 // ever produce (DRAG_MAX_PX already maps to maximum launch force — nothing
 // further out does anything extra) isn't "a big drag", it's a forged/
 // injected input payload. Reject outright rather than silently clamping it
 // and saying nothing.
-export const LAUNCH_MAGNITUDE_REJECT_PX = DRAG_MAX_PX * 4
+//
+// FALSE-POSITIVE FIX (9 Oct 2026): the 4x multiplier was rejecting real
+// players too. Live anti-cheat alerts for an established, progressing
+// account (arena stages unlocked, coins/XP earned over time — not a fresh
+// bot account) showed launchMagnitude values repeatedly clustering at
+// ~410-560, just over the old 400px (DRAG_MAX_PX * 4) line. A forged/
+// injected payload has no reason to land just barely past a threshold it
+// has no way of knowing about — that tight clustering just above the old
+// line, on a real account, is the signature of legitimate (if enthusiastic
+// full-screen-swipe) drags being inflated past DRAG_MAX_PX, not an attack.
+// Raised to 10x so it still rejects genuinely implausible/forged values
+// (which are typically orders of magnitude off, not a few hundred px over)
+// while covering the real-world range actually observed.
+export const LAUNCH_MAGNITUDE_REJECT_PX = DRAG_MAX_PX * 10
 
 // Scripted-movement detection: near-zero variance in the timing between
 // inputs, across enough inputs to rule out coincidence, is a strong signal
