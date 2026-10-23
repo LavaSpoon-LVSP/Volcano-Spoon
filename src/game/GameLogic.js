@@ -32,6 +32,8 @@ import {
   JACKPOT_COIN_MIN, JACKPOT_COIN_MAX,
   JACKPOT_COMBO_BOOST,
   DIAMOND_BASE_POINTS,
+  DIAMOND_COIN_PAYOUT, DIAMOND_COMBO_BOOST_MULT, DIAMOND_NEARBY_LAVA_MULT, DIAMOND_BOOST_DURATION_MS,
+  GRAVITY_STEER_MAX_SPEED, ROSE_COMBO_SAFE_MS, SUN_FLAME_COMBO_MULT, SUN_FLAME_BOOST_MS, MYTHIC_VISUAL_MS,
   HEALTH_ORB_HEAL,
   // World Event System
   LAVA_RAIN_DROP_RADIUS, LAVA_RAIN_DROP_DAMAGE,
@@ -74,6 +76,14 @@ export class GameLogic {
     this.arena      = new ArenaSystem()
     this.levels     = new LevelSystem()
 
+    this._lastBlackOrbDistortUntil = 0   // set when a Black Orb is collected (see case 'black')
+    this._diamondBoostUntil = 0
+    this._sunBoostUntil = 0
+    this._comboSafeUntil = 0
+    this._steerTarget = null
+    this.diamondPayoutCount = 0
+    this._scoreFrac = 0
+    this._mythicVisualUntil = 0   // display-only timer for the Mythic Orb transformation (never read by the simulation)
     this.score          = 0
     this.bestScore      = 0
     this.coins          = 0  // run-local coin tally (optimistic, reconciled by server state)
@@ -200,11 +210,14 @@ export class GameLogic {
    * launch-impulse feel. Safe to call with an unchanged value; safe to omit
    * (defaults to Stage 1: slowest pace, no earthquake/darkness).
    */
-  setArenaStage(stage) {
+  setArenaStage(stage, stageMultipliers = null) {
     this.arenaStage = Number.isFinite(Number(stage)) ? Number(stage) : this.arenaStage
     this._stageProfile = getStageProfile(this.arenaStage)
     this.orbs.setArenaStage(this.arenaStage)
     this.arena.setStageProfile(this.arenaStage)
+    if (stageMultipliers) {
+      this.stageConfig = { ...this.stageConfig, ...stageMultipliers }
+    }
   }
 
   /**
@@ -300,7 +313,7 @@ export class GameLogic {
     this.orbs.spawnIntervalMs = Math.max(300, diff.spawnIntervalMs * levelProfile.spawnIntervalMultiplier)
 
     // Pacing — the Arena Stage's base pace (see arenaStages.js) is now the
-    // PRIMARY speed signal: Stage 1 is a genuinely slow 0.45x, Stage 8 tops
+    // PRIMARY speed signal: Stage 1 is a genuinely slow 0.35x, Stage 8 tops
     // out at 1.50x. This replaced an earlier version that drove both orb
     // speed and the spoon's own launch force off DifficultySystem's within-
     // run ramp directly — that ramp alone could climb well past 2x over a
@@ -333,6 +346,27 @@ export class GameLogic {
     // 3. Physics — gravity override hook (non-invasive: reads gravityOverride if set)
     const gravityMultiplier = diff.gravityMultiplier * levelProfile.gravityMultiplier * mods.gravityFactor
     this.physics.gravityOverride = gravityMultiplier !== 1.0 ? GRAVITY * gravityMultiplier : null
+    // Rose Orb combo protection window (hazards cannot break the combo).
+    this.combo.hazardProtected = now < this._comboSafeUntil
+    // Gravity Orb direct control: normal momentum is paused and the spoon
+    // follows the player's finger/mouse (target set by 'steer' inputs), at a
+    // clamped speed. Velocity is zeroed so control ends with no position jump.
+    if (mods.gravityControlActive && this.physics.launched) {
+      this.physics.vx = 0
+      this.physics.vy = 0
+      this.physics.gravityOverride = 0
+      if (this._steerTarget) {
+        const ddx = this._steerTarget.x - this.physics.x
+        const ddy = this._steerTarget.y - this.physics.y
+        const dist = Math.hypot(ddx, ddy)
+        const maxStep = GRAVITY_STEER_MAX_SPEED * dt
+        const k = dist > maxStep ? maxStep / dist : 1
+        this.physics.x += ddx * k
+        this.physics.y += ddy * k
+      }
+    } else {
+      this._steerTarget = null
+    }
     const collision = this.physics.update(dt)
 
     // 4. Visual effects
@@ -441,6 +475,19 @@ export class GameLogic {
   // any other/legacy type just buffers a plain upward launch.
   handleInput(type = 'launch', payload = {}) {
     if (this.gameOver || this.paused) return
+    const controlActive = this.powerups.isGravityControlActive(simTime())
+    if (type === 'steer') {
+      // Gravity Orb direct control: payload.dx/dy is the TARGET position in
+      // game-space px. Ignored outside the 3 s window, so extra/forged steer
+      // inputs are harmless; the move speed is clamped in update().
+      if (!controlActive) return
+      const tx = Number(payload.dx), ty = Number(payload.dy)
+      if (!Number.isFinite(tx) || !Number.isFinite(ty)) return
+      this._steerTarget = { x: tx, y: ty }
+      return
+    }
+    // A launch during direct control would fight the steering; ignore it.
+    if (controlActive) return
     this.physics.bufferInput(payload)
   }
 
@@ -467,6 +514,8 @@ export class GameLogic {
         skin: this._resolvePlayerSkin(mods, now),
       },
       collectibles: this.orbs.getOrbs(),
+      mythicVisualMs: Math.max(0, this._mythicVisualUntil - now),
+      mythicVisualTotalMs: MYTHIC_VISUAL_MS,
       obstacle:     this.obstacle,
       floatTexts:   this.floatTexts,
       bounceEffects: this.effects,
@@ -549,6 +598,14 @@ export class GameLogic {
 
   reset() {
     const survivalMs = simTime() - this.sessionStartMs
+    this._lastBlackOrbDistortUntil = 0
+    this._diamondBoostUntil = 0
+    this._sunBoostUntil = 0
+    this._comboSafeUntil = 0
+    this._steerTarget = null
+    this.diamondPayoutCount = 0
+    this._scoreFrac = 0
+    this._mythicVisualUntil = 0   // display-only timer for the Mythic Orb transformation (never read by the simulation)
     this.difficulty.recordDeath(survivalMs)
     if (this.score > this.bestScore) this.bestScore = this.score
 
@@ -590,23 +647,37 @@ export class GameLogic {
   }
 
   _resolvePlayerSkin(mods, now) {
-    // Active powerup skins take priority (they're time-limited visual states)
+    // Active powerup skins take priority (they're time-limited, FUNCTIONAL
+    // visual states — they tell the player shield/turbo/etc. is live right
+    // now, not just decoration — so these still override everything else,
+    // equipped Spoon Skin included).
     if (mods.turboActive)   return 'turbo'
     if (mods.shieldActive)  return 'shield'
     if (mods.freezeActive)  return 'freeze'
     if (mods.gravityActive) return 'gravity'
     if (mods.magnetActive)  return 'magnet'
-    // Otherwise briefly show the skin of the last orb collected — but only
-    // for ORB_SKIN_DISPLAY_MS after the pickup (see _handleOrbCollected).
-    // This used to never expire, which meant the very first orb of the run
-    // permanently hid the player's equipped Spoon Skin for the rest of the
-    // match. Once it expires (or before any orb's been collected yet),
-    // fall back to the player's own equipped cosmetic skin — which is the
-    // look that should "win" by default — then finally 'default'.
+
+    // FIXED 14 Oct 2026: a purchased/equipped Spoon Skin is a deliberate
+    // cosmetic choice and must persist for the WHOLE run once set — not
+    // just until the next orb pickup. Previously the orb-flash check below
+    // ran BEFORE this and could override an equipped skin on every single
+    // orb collected; since a normal run collects orbs continuously (well
+    // under the ORB_SKIN_DISPLAY_MS=1500ms window between them), that meant
+    // the equipped skin was visible for a brief moment right after
+    // equipping and then effectively never again for the rest of the
+    // match — it kept "reverting to the basic spoon" on every coin. An
+    // equipped skin now always wins over the orb flash; the orb flash only
+    // ever applies to a player using the built-in default look.
+    if (this.equippedSkin) return this.equippedSkin
+
+    // No skin equipped — briefly show the skin of the last orb collected,
+    // for ORB_SKIN_DISPLAY_MS after the pickup (see _handleOrbCollected),
+    // as a purely cosmetic flourish on the default spoon. Once it expires
+    // (or before any orb's been collected yet), fall back to 'default'.
     if (this.lastCollectedOrb && now < this._lastCollectedOrbUntil) {
       return this.lastCollectedOrb
     }
-    return this.equippedSkin ?? 'default'
+    return 'default'
   }
 
   /** Returns and clears server-bound events (jackpot, mythic, game_over) */
@@ -656,14 +727,24 @@ export class GameLogic {
     switch (orb.type) {
       case 'lava': {
         const res = mods.turboActive ? this.combo.onTurboLavaOrb(now) : this.combo.onLavaOrb(now)
-        const pts = Math.floor(LAVA_ORB_BASE_SCORE * res.multiplier)
+        // Orb boosts: Diamond (combo x1.25, Lava Orb value x4) and Sun Flame
+        // (combo x1.5). The two combo boosts do not multiply together; the larger wins.
+        const diamondOn = now < this._diamondBoostUntil
+        const sunOn = now < this._sunBoostUntil
+        const comboGain = Math.max(diamondOn ? DIAMOND_COMBO_BOOST_MULT : 1, sunOn ? SUN_FLAME_COMBO_MULT : 1)
+        const lavaValue = diamondOn ? DIAMOND_NEARBY_LAVA_MULT : 1
+        // Fractional carry so a x1.25 / x1.5 boost is not lost to rounding on a small base
+        // score. With no boost the product is a whole number, so behaviour is unchanged.
+        const rawPts = LAVA_ORB_BASE_SCORE * res.multiplier * comboGain * lavaValue + this._scoreFrac
+        const pts = Math.floor(rawPts + 1e-9)
+        this._scoreFrac = rawPts - pts
         this.score += pts
         // Base Lava Coin grant — this was missing entirely (only the rarer
         // turbo/jackpot/chaos orbs below ever added to this.coins), which
         // would have meant a real run never earned any Lava Coins for
         // ordinary orb collection. Matches the live backend's
         // `this.coins += COIN_PER_LAVA_ORB` on every lava orb pickup.
-        this.coins += COIN_PER_LAVA_ORB
+        this.coins += COIN_PER_LAVA_ORB * lavaValue
         if (res.tieredUp) {
           this._spawnFloatText(`x${res.multiplier} COMBO!`, px, py - 50, '#ffff77')
           this.effects.createImpactGlow(px, py, 'wall_bounce', 1.2)
@@ -699,6 +780,20 @@ export class GameLogic {
       }
       case 'diamond': {
         this.score += DIAMOND_BASE_POINTS
+        // Massive coin payout: credited at most ONCE per run. The replay is
+        // deterministic and a Diamond only spawns at its Arena Stage gate, so a
+        // forged run cannot create one; this cap also stops a second Diamond in
+        // the same run from paying again. Goes through the normal settlement
+        // (rawCoins x run-start multiplier snapshot) - no second credit path.
+        if (this.diamondPayoutCount === 0) {
+          this.coins += DIAMOND_COIN_PAYOUT
+          this.diamondPayoutCount = 1
+          this._spawnFloatText(`+${DIAMOND_COIN_PAYOUT.toLocaleString('en-US')}🪙`, px, py - 80, '#ffd700')
+          this._serverEventQueue.push({ type: 'diamond_collected', orbId: orb.id, timestamp: now, coins: DIAMOND_COIN_PAYOUT })
+        }
+        // 5 s window: combo gain x1.25 and Lava Orbs worth x4. A second Diamond just refreshes the timer.
+        this._diamondBoostUntil = now + DIAMOND_BOOST_DURATION_MS
+        this._spawnFloatText('DIAMOND BOOST! x4', px, py - 100, '#aaddff')
         this._spawnFloatText(`+${DIAMOND_BASE_POINTS} DIAMOND!`, px, py - 55, '#aaddff')
         this.effects.createImpactGlow(px, py, 'ceiling_bounce', 2.5)
         this.effects.createTrailParticles(px, py, 'ceiling_bounce', 10)
@@ -707,6 +802,8 @@ export class GameLogic {
       }
       case 'bad_rock': {
         if (mods.turboActive) { this._spawnFloatText('TURBO BLOCK!', px, py - 40, '#00ffcc'); break }
+        // Orbs document: Shield "protects the player from hazards, sticky lava, rocks, and collisions".
+        if (mods.shieldActive) { this._spawnFloatText('SHIELD BLOCK!', px, py - 40, '#ffe066'); break }
         this.combo.breakCombo('bad_rock')
         this.score = Math.max(0, this.score - orb.scorePenalty)
         this._spawnFloatText(`-${orb.scorePenalty} COMBO BREAK!`, px, py - 40, '#ff4444')
@@ -721,6 +818,8 @@ export class GameLogic {
         // Always ignite lava sticks on both walls, even with shield/invincibility —
         // those just prevent the lava sticks from damaging the player on touch.
         this.orbs.spawnLavaSticks()
+        // Orbs document: Shield protects from hazards - no coin penalty while it is active.
+        if (mods.shieldActive) { this._spawnFloatText('SHIELD BLOCK!', px, py - 40, '#ffe066'); break }
         this._spawnFloatText('FIRE WALL!', px, py - 40, '#ff6600')
         this.effects.createImpactGlow(px, py, 'wall_bounce', 1.5)
         // Additional: deduct 25 to 75 Lava Coins
@@ -757,7 +856,7 @@ export class GameLogic {
         break
       case 'gravity':
         this.powerups.activate('gravity', null, now)
-        this._spawnFloatText('LOW GRAVITY!', px, py - 40, '#66aaff')
+        this._spawnFloatText('GRAVITY CONTROL! 3s', px, py - 40, '#66aaff')
         break
       case 'health':
         this.health = Math.min(MAX_HEALTH, this.health + HEALTH_ORB_HEAL)
@@ -778,6 +877,7 @@ export class GameLogic {
         break
       }
       case 'mythic':
+        this._mythicVisualUntil = now + MYTHIC_VISUAL_MS   // display only: no score/coin/physics/RNG effect
         this._serverEventQueue.push({ type: 'mythic_collected', orbId: orb.id, timestamp: now, score: this.score })
         this._spawnFloatText('MYTHIC!!!', px, py - 60, '#ffffff')
         this.effects.createImpactGlow(px, py, 'ceiling_bounce', 5.0)
@@ -793,36 +893,44 @@ export class GameLogic {
       }
       case 'rose': {
         this.health = Math.min(MAX_HEALTH, this.health + ROSE_ORB_HEAL)
+        this._comboSafeUntil = now + ROSE_COMBO_SAFE_MS
+        this.combo.hazardProtected = true
+        this._spawnFloatText('COMBO SAFE!', px, py - 58, '#ff88cc')
         this._spawnFloatText(`+${ROSE_ORB_HEAL} HP`, px, py - 40, '#ff88cc')
         this.effects.createImpactGlow(px, py, 'wall_bounce', 1.2)
         break
       }
       case 'black': {
-        // Black Orb: hazard-like penalty orb — full combo break (not eligible
-        // for the comboStabilize artifact perk, which only softens *hazard*
-        // damage hits) plus a score penalty and a brief visual distortion flag
-        // the renderer can read off the orb's collection event.
+        // Black Orb: hazard-like penalty orb — takes Lava Coins and damages the combo
+        // Shield blocks the whole penalty (coins, combo, distortion).
+        if (mods.shieldActive) { this._spawnFloatText('SHIELD BLOCK!', px, py - 40, '#ffe066'); break }
         this.combo.breakCombo('black')
         this.score = Math.max(0, this.score - BLACK_ORB_SCORE_PENALTY)
+        const blackCoinPenalty = 25
+        this.coins = Math.max(0, this.coins - blackCoinPenalty)
         this._lastBlackOrbDistortUntil = now + BLACK_ORB_DISTORT_MS
         this._spawnFloatText(`-${BLACK_ORB_SCORE_PENALTY} COMBO BREAK!`, px, py - 40, '#aa00ff')
+        this._spawnFloatText(`-${blackCoinPenalty}🪙`, px, py - 58, '#aa00ff')
         this.effects.createImpactGlow(px, py, 'ceiling_bounce', 1.0)
         break
       }
       case 'sun_flame': {
+        // Sun Flame Orb: gives +50 Lava Coins and +50 score bonus
         this.score += SUN_FLAME_ORB_BONUS
+        this.coins += SUN_FLAME_ORB_BONUS
+        this._sunBoostUntil = now + SUN_FLAME_BOOST_MS
+        this._spawnFloatText('SUN BOOST!', px, py - 86, '#ffcc00')
         this._spawnFloatText(`+${SUN_FLAME_ORB_BONUS} SUN FLAME!`, px, py - 50, '#ffcc00')
+        this._spawnFloatText(`+${SUN_FLAME_ORB_BONUS}🪙`, px, py - 68, '#ffcc00')
         this.effects.createImpactGlow(px, py, 'wall_bounce', 1.6)
         this.effects.createTrailParticles(px, py, 'wall_bounce', 8)
         break
       }
       case 'electric': {
-        // Electric Shock: auto-collects nearby active lava orbs within its
-        // shock radius, running each one through the normal lava-orb
-        // collection effect (score/coins/combo) so this stays fully
-        // deterministic for replay — no extra RNG or side effects beyond what
-        // collecting those lava orbs individually would have done.
-        this._spawnFloatText('SHOCK!', px, py - 45, '#33aaff')
+        // Electric Shock: briefly freezes the screen and collects nearby Lava Orbs
+        this.orbs.activateFreeze(ELECTRIC_SHOCK_MS)
+        this._emitFeel({ type: 'electric_shock', freezeMs: 120, zoom: 1.05, flash: '#33aaff', shake: 6 })
+        this._spawnFloatText('SHOCK FREEZE!', px, py - 45, '#33aaff')
         this.effects.createImpactGlow(px, py, 'wall_bounce', 1.4)
         this.effects.createTrailParticles(px, py, 'wall_bounce', 6)
         const chained = this.orbs.collectNearby('lava', px, py, ELECTRIC_COLLECT_RADIUS)

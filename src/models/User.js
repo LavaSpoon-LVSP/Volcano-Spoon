@@ -209,6 +209,16 @@ const userSchema = new mongoose.Schema(
     min: 0,
   },
 
+  // ── Daily Free Energy Allowance (Row D1) ──
+  // Tracks free Energy claimed today (initial tank of 10 + passive regen).
+  // Capped at EnergyConfig.dailyFreeEnergyLimit (default 50).
+  // Resets to initial tank (10) at each daily reset.
+  freeEnergyToday: {
+    type: Number,
+    default: 10,
+    min: 0,
+  },
+
   // Timestamp regen ticks are measured from. Advanced forward (not reset to
   // "now") each time regen ticks are applied, so partial progress toward
   // the next +1 tick is never lost — see EnergyService.settleUserEnergy().

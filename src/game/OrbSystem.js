@@ -26,11 +26,13 @@ import {
   DIAMOND_ORB_WEIGHT, DIAMOND_ORB_RADIUS, DIAMOND_LIFETIME_MS, DIAMOND_BASE_POINTS,
   HEALTH_ORB_WEIGHT, HEALTH_ORB_RADIUS, HEALTH_ORB_HEAL, HEALTH_ORB_LIFETIME_MS,
   STRUGGLE_FREEZE_BOOST, STRUGGLE_SHIELD_BOOST, STRUGGLE_HAZARD_REDUCTION, STRUGGLE_SPEED_REDUCTION,
-  JACKPOT_MIN_ARENA_STAGE, MYTHIC_MIN_ARENA_STAGE,
-  SHIELD_MIN_ARENA_STAGE, MAGNET_MIN_ARENA_STAGE, HEALTH_MIN_ARENA_STAGE,
-  FREEZE_MIN_ARENA_STAGE, GRAVITY_MIN_ARENA_STAGE,
-  COMBO_ORB_WEIGHT, COMBO_ORB_SPEED, COMBO_ORB_RADIUS, COMBO_ORB_BOOST, COMBO_MIN_ARENA_STAGE,
-  ROSE_ORB_WEIGHT, ROSE_ORB_RADIUS, ROSE_ORB_SPEED, ROSE_ORB_HEAL, ROSE_MIN_ARENA_STAGE,
+  TURBO_MIN_ARENA_STAGE, SHIELD_MIN_ARENA_STAGE, BAD_ROCK_MIN_ARENA_STAGE, FIRE_WALL_MIN_ARENA_STAGE,
+  COMBO_MIN_ARENA_STAGE, ROSE_MIN_ARENA_STAGE, MAGNET_MIN_ARENA_STAGE, BLACK_MIN_ARENA_STAGE,
+  DIAMOND_MIN_ARENA_STAGE, FREEZE_MIN_ARENA_STAGE, CHAOS_MIN_ARENA_STAGE, SUN_FLAME_MIN_ARENA_STAGE,
+  ELECTRIC_MIN_ARENA_STAGE, GRAVITY_MIN_ARENA_STAGE, MYTHIC_MIN_ARENA_STAGE, JACKPOT_MIN_ARENA_STAGE,
+  HEALTH_MIN_ARENA_STAGE,
+  COMBO_ORB_WEIGHT, COMBO_ORB_SPEED, COMBO_ORB_RADIUS, COMBO_ORB_BOOST,
+  ROSE_ORB_WEIGHT, ROSE_ORB_RADIUS, ROSE_ORB_SPEED, ROSE_ORB_HEAL,
   BLACK_ORB_WEIGHT, BLACK_ORB_RADIUS, BLACK_ORB_SPEED, BLACK_ORB_SCORE_PENALTY, BLACK_ORB_DISTORT_MS,
   SUN_FLAME_ORB_WEIGHT, SUN_FLAME_ORB_RADIUS, SUN_FLAME_ORB_SPEED, SUN_FLAME_ORB_BONUS, SUN_FLAME_LIFETIME_MS,
   ELECTRIC_ORB_WEIGHT, ELECTRIC_ORB_RADIUS, ELECTRIC_ORB_SPEED, ELECTRIC_SHOCK_MS, ELECTRIC_COLLECT_RADIUS, ELECTRIC_LIFETIME_MS,
@@ -39,18 +41,26 @@ import { random } from './seededRandom.js'
 import { now as simTime } from './simClock.js'
 
 // Arena-Stage Orb Unlocks — additive gate applied on top of whatever
-// LevelSystem's spawnWeights already allow (see constants.js). Matches the
-// backend's POWERUP_STAGE_GATES for the orb types this engine has.
+// LevelSystem's spawnWeights already allow (see constants.js).
+// Matches the official Full Orb System specification across all 17 orb types.
 const ORB_STAGE_GATES = {
-  jackpot: JACKPOT_MIN_ARENA_STAGE,
-  mythic:  MYTHIC_MIN_ARENA_STAGE,
-  shield:  SHIELD_MIN_ARENA_STAGE,
-  magnet:  MAGNET_MIN_ARENA_STAGE,
-  health:  HEALTH_MIN_ARENA_STAGE,
-  freeze:  FREEZE_MIN_ARENA_STAGE,
-  gravity: GRAVITY_MIN_ARENA_STAGE,
-  combo:   COMBO_MIN_ARENA_STAGE,
-  rose:    ROSE_MIN_ARENA_STAGE,
+  turbo:     TURBO_MIN_ARENA_STAGE,
+  shield:    SHIELD_MIN_ARENA_STAGE,
+  bad_rock:  BAD_ROCK_MIN_ARENA_STAGE,
+  fire_wall: FIRE_WALL_MIN_ARENA_STAGE,
+  combo:     COMBO_MIN_ARENA_STAGE,
+  rose:      ROSE_MIN_ARENA_STAGE,
+  magnet:    MAGNET_MIN_ARENA_STAGE,
+  black:     BLACK_MIN_ARENA_STAGE,
+  diamond:   DIAMOND_MIN_ARENA_STAGE,
+  freeze:    FREEZE_MIN_ARENA_STAGE,
+  chaos:     CHAOS_MIN_ARENA_STAGE,
+  sun_flame: SUN_FLAME_MIN_ARENA_STAGE,
+  electric:  ELECTRIC_MIN_ARENA_STAGE,
+  gravity:   GRAVITY_MIN_ARENA_STAGE,
+  mythic:    MYTHIC_MIN_ARENA_STAGE,
+  jackpot:   JACKPOT_MIN_ARENA_STAGE,
+  health:    HEALTH_MIN_ARENA_STAGE,
 }
 
 const DEFAULT_WEIGHTS = {
@@ -482,6 +492,16 @@ export class OrbSystem {
     if (orb) {
       if (this.eruptionMode) spawnOrbAtTop(orb, this._effectiveDarkness())
       else if (this._effectiveDarkness()) { orb.hidden = true; orb.alpha = 0 }
+      this.orbs.push(orb)
+    }
+    return orb
+  }
+
+  spawnOrb(type, options = {}) {
+    const orb = this._createOrbByType(type)
+    if (orb) {
+      if (options.fromTop) spawnOrbAtTop(orb, options.hidden ?? this._effectiveDarkness())
+      else if (options.hidden ?? this._effectiveDarkness()) { orb.hidden = true; orb.alpha = 0 }
       this.orbs.push(orb)
     }
     return orb

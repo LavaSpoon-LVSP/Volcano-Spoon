@@ -18,6 +18,8 @@ export class ComboSystem {
     this.isBroken     = false
     this.justTieredUp = false
     this.peakTier     = 0
+    // Rose Orb: while true, hazard/orb breaks do NOT reset the combo (timeout still does).
+    this.hazardProtected = false
   }
 
   onLavaOrb(now) {
@@ -40,6 +42,7 @@ export class ComboSystem {
 
   breakCombo(reason = 'unknown') {
     if (this.count === 0) return
+    if (this.hazardProtected && reason !== 'timeout') return
     this.totalBroken++
     this.isBroken     = true
     this.count        = 0
@@ -77,6 +80,7 @@ export class ComboSystem {
    */
   breakOnHazard(retention = 0) {
     if (this.count === 0) return
+    if (this.hazardProtected) return
     this.totalBroken++
     this.isBroken     = true
     const keep         = retention > 0 ? Math.floor(this.count * retention) : 0

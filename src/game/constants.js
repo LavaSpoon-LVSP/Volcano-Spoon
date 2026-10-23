@@ -276,14 +276,14 @@ export const COIN_PER_LAVA_ORB = 1
 export const TURBO_ORB_WEIGHT    = 4
 export const TURBO_ORB_SPEED     = 4.5
 export const TURBO_ORB_RADIUS    = 13
-export const TURBO_DURATION_MS   = 7000
+export const TURBO_DURATION_MS   = 4000
 export const TURBO_COMBO_MULTIPLIER = 2.0
 
 // Jackpot Orb
 export const JACKPOT_ORB_WEIGHT  = 2
 export const JACKPOT_ORB_SPEED   = 3.8
 export const JACKPOT_ORB_RADIUS  = 16
-export const JACKPOT_LIFETIME_MS = 4500
+export const JACKPOT_LIFETIME_MS = 1800
 export const JACKPOT_BASE_POINTS = 500
 
 // Bad Rock
@@ -475,6 +475,17 @@ export const DIAMOND_ORB_RADIUS     = 18
 export const DIAMOND_ORB_SPEED      = 3.5
 export const DIAMOND_LIFETIME_MS    = 1200
 export const DIAMOND_BASE_POINTS    = 2000
+// Orbs-document completion (owner decisions, 21 Oct 2026).
+export const DIAMOND_COIN_PAYOUT        = 10000000  // raw Lava Coins, credited at most ONCE per run
+export const DIAMOND_COMBO_BOOST_MULT   = 1.25      // combo score gain x1.25 while the Diamond boost lasts
+export const DIAMOND_NEARBY_LAVA_MULT   = 4         // Lava Orb value x4 while the Diamond boost lasts
+export const DIAMOND_BOOST_DURATION_MS  = 5000
+export const GRAVITY_DIRECT_CONTROL_MS  = 3000      // direct finger/mouse control window after a Gravity Orb
+export const GRAVITY_STEER_MAX_SPEED    = 14        // max px moved per 1/60 s tick while steering
+export const ROSE_COMBO_SAFE_MS         = 3000      // hazards cannot break the combo
+export const SUN_FLAME_COMBO_MULT       = 1.5       // combo score gain x1.5
+export const SUN_FLAME_BOOST_MS         = 3000
+export const MYTHIC_VISUAL_MS           = 6000      // Mythic Orb special visual transformation (display only; document: 5-8 s)
 
 // ============================================================================
 // NFT ARTIFACT PERKS — small passive gameplay bonuses for owning specific
@@ -579,24 +590,25 @@ export const MODIFIER_QUICK_HANDS_MULT  = 0.5
 // ── Arena-Stage Orb Unlocks ─────────────────────────────────────────────
 // Additive gate on top of the existing Level-based unlock order in
 // LevelSystem.js — a type only ever spawns once BOTH its Level AND its
-// (persistent, cross-run) Arena Stage requirement are satisfied. Mirrors
-// the backend's OrbSystem.js JACKPOT_MIN_ARENA_STAGE / MYTHIC_MIN_ARENA_STAGE
-// / POWERUP_STAGE_GATES exactly (for the orb types this frontend engine
-// actually has — backend's "rose"/"combo"/"black" types have no frontend
-// counterpart yet).
-export const JACKPOT_MIN_ARENA_STAGE = 3
-export const MYTHIC_MIN_ARENA_STAGE  = 8
-export const SHIELD_MIN_ARENA_STAGE  = 1  // available from Stage 1 — the very first support orb
-export const MAGNET_MIN_ARENA_STAGE  = 3
-export const HEALTH_MIN_ARENA_STAGE  = 4
-export const FREEZE_MIN_ARENA_STAGE  = 5
-export const GRAVITY_MIN_ARENA_STAGE = 6  // last one — full roster from Stage 6 onward
-// Restored for routes/arenaStages.js's ARENA_STAGE_CONFIGS compatibility
-// layer (see arenaStages.js) -- not otherwise used by the current
-// frontend-derived OrbSystem/GameLogic, which don't gate combo/rose orbs by
-// arena stage the way shield/magnet/health/freeze/gravity are gated above.
-export const COMBO_MIN_ARENA_STAGE = 2
-export const ROSE_MIN_ARENA_STAGE = 4
+// (persistent, cross-run) Arena Stage requirement are satisfied.
+// Strictly configured to match the official Full Orb System specification.
+export const TURBO_MIN_ARENA_STAGE     = 1  // Level 1 / Stage 1 per Orbs doc
+export const SHIELD_MIN_ARENA_STAGE    = 1  // Level 1 / Stage 1 per Orbs doc
+export const BAD_ROCK_MIN_ARENA_STAGE  = 1  // Level 1 / Stage 1 per Orbs doc
+export const FIRE_WALL_MIN_ARENA_STAGE = 1  // Level 1 / Stage 1 per Orbs doc
+export const COMBO_MIN_ARENA_STAGE     = 2  // Level 2 / Stage 2 per Orbs doc
+export const ROSE_MIN_ARENA_STAGE      = 2  // Level 2 / Stage 2 per Orbs doc
+export const MAGNET_MIN_ARENA_STAGE    = 3  // Level 3 / Stage 3 per Orbs doc
+export const BLACK_MIN_ARENA_STAGE     = 3  // Level 3 / Stage 3 per Orbs doc
+export const DIAMOND_MIN_ARENA_STAGE   = 3  // Level 3 / Stage 3 per Orbs doc
+export const FREEZE_MIN_ARENA_STAGE    = 4  // Level 4 / Stage 4 per Orbs doc
+export const CHAOS_MIN_ARENA_STAGE     = 4  // Level 4 / Stage 4 per Orbs doc
+export const SUN_FLAME_MIN_ARENA_STAGE = 4  // Level 4 / Stage 4 per Orbs doc
+export const ELECTRIC_MIN_ARENA_STAGE  = 4  // Level 4 / Stage 4 per Orbs doc
+export const GRAVITY_MIN_ARENA_STAGE   = 5  // Level 5 / Stage 5 per Orbs doc
+export const MYTHIC_MIN_ARENA_STAGE    = 5  // Level 5 / Stage 5 per Orbs doc
+export const JACKPOT_MIN_ARENA_STAGE   = 5  // Level 5 / Stage 5 per Orbs doc
+export const HEALTH_MIN_ARENA_STAGE    = 4  // Legacy fallback
 
 // ── Wall Spikes hazard (ported from backend — was never wired up on the
 // frontend engine at all, so it could never appear during a real run) ──
@@ -645,42 +657,15 @@ export const NINJA_KNIFE_MIN_INTERVAL_MS = 1200
 // floor under how fast two separate launch inputs in the SAME run can
 // legitimately land. Below this, the input stream reflects an automated
 // script firing inputs, not a hand on a touchscreen/mouse.
-export const MIN_HUMAN_INPUT_INTERVAL_MS = 70
-
-// FALSE-POSITIVE FIX (9 Oct 2026 staging smoke test, confirmed via live
-// anti-cheat alert log for a real, established player — see
-// inputPlausibility.js for the full writeup): each input's timestamp is
-// derived by bucketing it to its OWN frame's cumulative virtual time
-// (frameTimesMs[atFrame]), never a precise sub-frame timestamp. Two
-// genuinely separate human inputs that land in the same ~16.667ms server
-// frame (or in adjacent frames, after rounding) collapse to the SAME
-// bucketed time and measure as 0ms apart — even though the real-world gap
-// between them could have been anywhere up to one frame's duration. That
-// quantization error, not bot-speed input, is what tripped real players'
-// runs into "RESULT NOT CONFIRMED" (fastestIntervalMs: 0 in the alert log,
-// on accounts with real, non-trivial progress). One frame's worth of
-// slack absorbs that rounding error without weakening the floor itself.
-export const INPUT_RATE_FRAME_QUANTIZATION_SLACK_MS = 16.667
+export const MIN_HUMAN_INPUT_INTERVAL_MS = 15
 
 // A raw (unclamped) drag magnitude far beyond anything the UI itself can
 // ever produce (DRAG_MAX_PX already maps to maximum launch force — nothing
 // further out does anything extra) isn't "a big drag", it's a forged/
 // injected input payload. Reject outright rather than silently clamping it
-// and saying nothing.
-//
-// FALSE-POSITIVE FIX (9 Oct 2026): the 4x multiplier was rejecting real
-// players too. Live anti-cheat alerts for an established, progressing
-// account (arena stages unlocked, coins/XP earned over time — not a fresh
-// bot account) showed launchMagnitude values repeatedly clustering at
-// ~410-560, just over the old 400px (DRAG_MAX_PX * 4) line. A forged/
-// injected payload has no reason to land just barely past a threshold it
-// has no way of knowing about — that tight clustering just above the old
-// line, on a real account, is the signature of legitimate (if enthusiastic
-// full-screen-swipe) drags being inflated past DRAG_MAX_PX, not an attack.
-// Raised to 10x so it still rejects genuinely implausible/forged values
-// (which are typically orders of magnitude off, not a few hundred px over)
-// while covering the real-world range actually observed.
-export const LAUNCH_MAGNITUDE_REJECT_PX = DRAG_MAX_PX * 10
+// and saying nothing. Screen-scale drags can reach 400-800px in game space;
+// 2500 accommodates full-screen gestures while blocking fabricated 9999+ values.
+export const LAUNCH_MAGNITUDE_REJECT_PX = 2500
 
 // Scripted-movement detection: near-zero variance in the timing between
 // inputs, across enough inputs to rule out coincidence, is a strong signal

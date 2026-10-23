@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Environment variables — real secrets/config live only in .env, never
+# committed. .env.example (checked in) documents the shape without values.
+.env
+.env.*.local
+
+# Logs
+npm-debug.log*
+*.log
+
+# Scratch/one-off debug scripts (the "_*_tmp.mjs" pattern this project has
+# used for throwaway DB checks) — keep these out of version control instead
+# of relying on remembering to delete them by hand each time.
+_*_tmp.mjs
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

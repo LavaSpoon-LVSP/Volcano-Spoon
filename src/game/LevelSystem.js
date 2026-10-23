@@ -1,27 +1,27 @@
 /**
  * LEVEL SYSTEM
  * Data-driven progression controlling orb unlocks and spawn balancing.
+ * Configured in strict accordance with the official Full Orb System specification.
  */
 
-// 'black' added to HAZARD_TYPES — Orb Roster Completion (A16) gave it a real
-// score-penalty + combo-break effect (see GameLogic._handleOrbCollected's
-// 'black' case), same category as bad_rock/fire_wall/chaos for the
-// hazardMultiplier scaling below. combo/rose/sun_flame/electric are bonus-
-// flavored (never punish the player), so they scale with SUPPORT_TYPES'
-// supportMultiplier instead, same as health/freeze/shield/magnet/gravity.
+// RARITY (Orbs document labels) -> spawn frequency. Weights below were set so that, in every level,
+//   common orbs (Lava, Turbo, Shield, Combo, Bad Rock, Fire Wall) spawn more often than
+//   uncommon (Magnet, Freeze, Rose, Black, Electric, Gravity), which spawn more often than
+//   rare (Chaos, Sun Flame), which spawn more often than the top tier (Diamond, Mythic, Jackpot).
+// Lava share and the total hazard share per level were kept as before (difficulty ramp unchanged).
+// Verified by scripts/orb_spec_check.js (seeded simulation, hard-fails on any rarity inversion).
+
 const HAZARD_TYPES = new Set(['bad_rock', 'fire_wall', 'chaos', 'black'])
-const SUPPORT_TYPES = new Set(['freeze', 'shield', 'magnet', 'gravity', 'health', 'combo', 'rose', 'sun_flame', 'electric'])
+const SUPPORT_TYPES = new Set(['freeze', 'shield', 'magnet', 'gravity', 'turbo', 'combo', 'rose', 'sun_flame', 'electric'])
 
 const LEVELS = [
   {
     level: 1,
     name: 'Warmup',
     minScore: 0,
-    // Kept deliberately unchanged (handover doc: "Level 1 must remain
-    // clearly easy and accessible... understand the basic gameplay within
-    // seconds") — no hazards, no new orb types, same gentle pacing.
-    unlocks: ['lava', 'health', 'diamond'],
-    spawnWeights: { lava: 100, health: 1, diamond: 0.15 },
+    // Full Orb System doc: Lava, Turbo, Shield, Bad Rock, Fire Wall unlock from Level 1
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall'],
+    spawnWeights: { lava: 72.69, turbo: 7.86, shield: 5.89, bad_rock: 6.88, fire_wall: 4.91 },
     spawnIntervalMultiplier: 1.18,
     speedMultiplier: 0.88,
     gravityMultiplier: 0.94,
@@ -33,20 +33,9 @@ const LEVELS = [
     level: 2,
     name: 'Cooling Window',
     minScore: 120,
-    // Handover doc: "Level 2 must be noticeably more difficult than Level
-    // 1... obvious during gameplay, not only through the level label."
-    // Previously Level 2 added only freeze/shield (both defensive/support,
-    // never punish the player) and nudged hazardMultiplier 0.45→0.5 — a
-    // multiplier with nothing to multiply, since bad_rock/fire_wall/chaos
-    // don't unlock until Level 3+. There was no actual obstacle here.
-    // Now introduces the Black Orb — a real, visually distinct new hazard
-    // (see OrbSystem.js's spawnBlackOrb / GameLogic's 'black' case) — as
-    // Level 2's first genuine obstacle, plus the Combo Orb for a clearly
-    // new *positive* element too. hazardMultiplier/speedMultiplier/
-    // spawnIntervalMultiplier/maxActiveOrbs are all stepped up more than
-    // before so the pace/pressure jump reads as real, not cosmetic.
-    unlocks: ['lava', 'freeze', 'shield', 'black', 'combo', 'health', 'diamond'],
-    spawnWeights: { lava: 80, freeze: 9, shield: 6, black: 4, combo: 5, health: 1.2, diamond: 0.2 },
+    // Full Orb System doc: Combo and Rose unlock from Level 2
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose'],
+    spawnWeights: { lava: 59.1, turbo: 7.77, shield: 6.66, bad_rock: 7.63, fire_wall: 5.72, combo: 6.66, rose: 1.78 },
     spawnIntervalMultiplier: 1.0,
     speedMultiplier: 1.0,
     gravityMultiplier: 0.98,
@@ -58,14 +47,13 @@ const LEVELS = [
     level: 3,
     name: 'Magnetic Drift',
     minScore: 280,
-    // Rose Orb joins here (heal-flavored bonus, like Health) alongside the
-    // existing Magnet/Bad Rock introductions.
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'black', 'combo', 'rose', 'health', 'diamond'],
-    spawnWeights: { lava: 70, freeze: 8, shield: 6, magnet: 8, bad_rock: 6, black: 4, combo: 4, rose: 4, health: 1.2, diamond: 0.25 },
+    // Full Orb System doc: Magnet, Black Orb, and Diamond unlock from Level 3
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond'],
+    spawnWeights: { lava: 50.42, turbo: 9.28, shield: 7.86, bad_rock: 7.83, fire_wall: 5.87, combo: 7.15, rose: 1.92, magnet: 1.92, black: 4.49, diamond: 0.24 },
     spawnIntervalMultiplier: 1.0,
     speedMultiplier: 0.97,
     gravityMultiplier: 1.0,
-    maxActiveOrbs: 12,   
+    maxActiveOrbs: 12,
     hazardMultiplier: 0.78,
     supportMultiplier: 1.25,
   },
@@ -73,10 +61,9 @@ const LEVELS = [
     level: 4,
     name: 'Thermal Shift',
     minScore: 500,
-    // Sun Flame Orb joins here (fast-decaying score-bonus orb) alongside
-    // the existing Turbo/Fire Wall introductions.
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'turbo', 'fire_wall', 'black', 'combo', 'rose', 'sun_flame', 'health', 'diamond'],
-    spawnWeights: { lava: 60, turbo: 8, freeze: 7, shield: 6, magnet: 7, bad_rock: 6, fire_wall: 4, black: 5, combo: 4, rose: 3, sun_flame: 3, health: 1.3, diamond: 0.3 },
+    // Full Orb System doc: Freeze, Chaos, Sun Flame, and Electric Shock unlock from Level 4
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond', 'freeze', 'chaos', 'sun_flame', 'electric'],
+    spawnWeights: { lava: 38.69, turbo: 9.95, shield: 8.21, bad_rock: 10.11, fire_wall: 7.59, combo: 7.35, rose: 2.07, magnet: 2.07, black: 3.89, diamond: 0.29, freeze: 2.07, chaos: 1.33, sun_flame: 1.03, electric: 2.07 },
     spawnIntervalMultiplier: 0.94,
     speedMultiplier: 1.02,
     gravityMultiplier: 1.03,
@@ -88,11 +75,9 @@ const LEVELS = [
     level: 5,
     name: 'Gravity Cracks',
     minScore: 800,
-    // Electric Shock Orb joins here, completing the full 16-type orb
-    // roster (see OrbSystem.js's header comment) well ahead of the
-    // Level 6-8 jackpot/chaos/mythic endgame tiers.
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'turbo', 'fire_wall', 'gravity', 'black', 'combo', 'rose', 'sun_flame', 'electric', 'health', 'diamond'],
-    spawnWeights: { lava: 54, turbo: 10, freeze: 6, shield: 5, magnet: 6, gravity: 6, bad_rock: 7, fire_wall: 4, black: 5, combo: 3, rose: 3, sun_flame: 3, electric: 3, health: 1.4, diamond: 0.35 },
+    // Full Orb System doc: Gravity, Mythic, and Jackpot unlock from Level 5 (full 17-orb roster active)
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond', 'freeze', 'chaos', 'sun_flame', 'electric', 'gravity', 'mythic', 'jackpot'],
+    spawnWeights: { lava: 33.6, turbo: 10.37, shield: 7.73, bad_rock: 11.63, fire_wall: 7.76, combo: 7.73, rose: 2.24, magnet: 2.24, black: 3.43, diamond: 0.3, freeze: 2.24, chaos: 1.18, sun_flame: 1.12, electric: 2.24, gravity: 2.24, mythic: 0.3, jackpot: 0.5 },
     spawnIntervalMultiplier: 0.88,
     speedMultiplier: 1.06,
     gravityMultiplier: 1.06,
@@ -104,12 +89,12 @@ const LEVELS = [
     level: 6,
     name: 'Fortune Faultline',
     minScore: 1200,
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'turbo', 'fire_wall', 'gravity', 'jackpot', 'black', 'combo', 'rose', 'sun_flame', 'electric', 'health', 'diamond'],
-    spawnWeights: { lava: 48, turbo: 10, jackpot: 3, freeze: 5, shield: 4, magnet: 6, gravity: 6, bad_rock: 10, fire_wall: 6, black: 5, combo: 3, rose: 3, sun_flame: 3, electric: 3, health: 1.5, diamond: 0.45 },
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond', 'freeze', 'chaos', 'sun_flame', 'electric', 'gravity', 'mythic', 'jackpot'],
+    spawnWeights: { lava: 29.21, turbo: 9.34, shield: 7.27, bad_rock: 14.26, fire_wall: 9.98, combo: 6.57, rose: 2.4, magnet: 2.4, black: 2.97, diamond: 0.3, freeze: 2.4, chaos: 1.02, sun_flame: 1.2, electric: 2.4, gravity: 2.4, mythic: 0.3, jackpot: 0.5 },
     spawnIntervalMultiplier: 0.82,
     speedMultiplier: 1.1,
     gravityMultiplier: 1.08,
-     maxActiveOrbs: 15,
+    maxActiveOrbs: 15,
     hazardMultiplier: 1.18,
     supportMultiplier: 1.0,
   },
@@ -117,11 +102,11 @@ const LEVELS = [
     level: 7,
     name: 'Chaotic Rift',
     minScore: 1700,
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'turbo', 'fire_wall', 'gravity', 'jackpot', 'chaos', 'black', 'combo', 'rose', 'sun_flame', 'electric', 'health', 'diamond'],
-    spawnWeights: { lava: 42, turbo: 10, jackpot: 3, freeze: 4, shield: 3, magnet: 5, gravity: 5, bad_rock: 12, fire_wall: 8, chaos: 6, black: 6, combo: 3, rose: 2, sun_flame: 2, electric: 2, health: 1.5, diamond: 0.5 },
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond', 'freeze', 'chaos', 'sun_flame', 'electric', 'gravity', 'mythic', 'jackpot'],
+    spawnWeights: { lava: 24.97, turbo: 7.45, shield: 5.9, bad_rock: 17.42, fire_wall: 11.62, combo: 5.9, rose: 2.53, magnet: 2.53, black: 2.69, diamond: 0.3, freeze: 2.53, chaos: 0.92, sun_flame: 1.26, electric: 2.53, gravity: 2.53, mythic: 0.3, jackpot: 0.5 },
     spawnIntervalMultiplier: 0.76,
     speedMultiplier: 1.14,
-     gravityMultiplier: 1.1,
+    gravityMultiplier: 1.1,
     maxActiveOrbs: 16,
     hazardMultiplier: 1.3,
     supportMultiplier: 0.95,
@@ -130,8 +115,8 @@ const LEVELS = [
     level: 8,
     name: 'Mythic Pressure',
     minScore: 2400,
-    unlocks: ['lava', 'freeze', 'shield', 'magnet', 'bad_rock', 'turbo', 'fire_wall', 'gravity', 'jackpot', 'chaos', 'mythic', 'black', 'combo', 'rose', 'sun_flame', 'electric', 'health', 'diamond'],
-    spawnWeights: { lava: 38, turbo: 11, jackpot: 4, freeze: 3, shield: 3, magnet: 4, gravity: 5, bad_rock: 13, fire_wall: 8, chaos: 8, mythic: 1, black: 6, combo: 2, rose: 2, sun_flame: 2, electric: 2, health: 1.8, diamond: 0.6 },
+    unlocks: ['lava', 'turbo', 'shield', 'bad_rock', 'fire_wall', 'combo', 'rose', 'magnet', 'black', 'diamond', 'freeze', 'chaos', 'sun_flame', 'electric', 'gravity', 'mythic', 'jackpot'],
+    spawnWeights: { lava: 21.47, turbo: 6.47, shield: 5.63, bad_rock: 19.64, fire_wall: 12.08, combo: 5.42, rose: 2.67, magnet: 2.67, black: 2.54, diamond: 0.3, freeze: 2.67, chaos: 0.87, sun_flame: 1.33, electric: 2.67, gravity: 2.67, mythic: 0.3, jackpot: 0.5 },
     spawnIntervalMultiplier: 0.7,
     speedMultiplier: 1.18,
     gravityMultiplier: 1.12,

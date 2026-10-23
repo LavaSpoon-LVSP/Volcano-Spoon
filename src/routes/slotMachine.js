@@ -285,8 +285,6 @@ export function createSlotMachineRouter(jwtSecret, sessions) {
         claimStatus: rewardType === 'nft' ? 'unclaimed' : 'not_applicable',
       })
 
-      console.log(`Slot Machine spin: user ${userId} drew ${rewardType}`, rewardDetail)
-
       res.json({
         rewardType,
         rewardDetail,
@@ -340,7 +338,7 @@ export function createSlotMachineRouter(jwtSecret, sessions) {
             message: 'This reward was already claimed.',
           })
         }
-        return res.status(409).json({ message: `This reward has already been ${existing.claimStatus}` })
+        return res.status(409).json({ message: 'This reward is already being processed.' })
       }
 
       const releaseBackToUnclaimed = () =>

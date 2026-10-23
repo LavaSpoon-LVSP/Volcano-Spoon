@@ -96,7 +96,7 @@ export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, 
       // frame. (Not the same clamp as GameEngine.js's separate cosmetic
       // prediction-rendering loop, which uses 4 for a different purpose.)
       const rawDt = Number(frames[i])
-      const dt = Number.isFinite(rawDt) && rawDt > 0 ? Math.min(3, rawDt) : 1
+      const dt = Number.isFinite(rawDt) && rawDt >= 0 ? Math.min(3, rawDt) : 1
 
       game.update(dt)
       simNow += dt * 16.667
@@ -108,6 +108,19 @@ export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, 
           jackpotTokensCollected: game.jackpotTokensCollected,
           framesReplayed: i + 1,
           crashed: false,
+          // 15 Oct 2026 checklist review, bug 5: server-replayed (never
+          // client-claimed) facts about this run, so badges.js can check a
+          // badge claim against what the replay itself proves. The orb
+          // flags come straight off GameLogic's own server-event queue
+          // (never drained during a replay, so it's a complete record of
+          // every jackpot_collected/mythic_collected event this run
+          // produced) — not a re-derivation, the same signal the live
+          // server already raises these events from.
+          maxCombo: game.combo?.getState?.()?.maxCombo ?? 0,
+          survivalMs: Math.round(simNow),
+          jackpotOrbCollected: game._serverEventQueue.some((e) => e.type === 'jackpot_collected'),
+          mythicOrbCollected: game._serverEventQueue.some((e) => e.type === 'mythic_collected'),
+          diamondPayouts: game.diamondPayoutCount || 0,
         }
       }
     }
@@ -118,6 +131,11 @@ export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, 
       jackpotTokensCollected: game.jackpotTokensCollected,
       framesReplayed: frames.length,
       crashed: false,
+      maxCombo: game.combo?.getState?.()?.maxCombo ?? 0,
+      survivalMs: Math.round(simNow),
+      jackpotOrbCollected: game._serverEventQueue.some((e) => e.type === 'jackpot_collected'),
+      mythicOrbCollected: game._serverEventQueue.some((e) => e.type === 'mythic_collected'),
+      diamondPayouts: game.diamondPayoutCount || 0,
     }
   } catch (error) {
     console.error('[ReplayEngine] replay crashed — treating as invalid run', error)

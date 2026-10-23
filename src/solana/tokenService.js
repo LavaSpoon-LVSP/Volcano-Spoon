@@ -206,10 +206,17 @@ export async function getWalletLsvpBalance(walletAddress) {
   const owner = walletAddress instanceof PublicKey ? walletAddress : new PublicKey(walletAddress)
   const tokenAddress = await getAssociatedTokenAddress(mint, owner, false, programId)
   try {
+    const accountInfo = await connection.getAccountInfo(tokenAddress)
+    if (!accountInfo) {
+      // Wallet has never held LSVP — legitimate zero balance, not an error
+      return 0
+    }
     const account = await connection.getTokenAccountBalance(tokenAddress)
     return Number(account.value.uiAmount ?? 0)
-  } catch {
-    return 0
+  } catch (error) {
+    // RPC network error or connection failure — do not silently return 0
+    console.warn(`[getWalletLsvpBalance] RPC error for ${tokenAddress.toBase58()}:`, error.message)
+    return 'unavailable'
   }
 }
 

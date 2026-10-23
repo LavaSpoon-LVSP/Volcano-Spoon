@@ -274,7 +274,6 @@ export function createNftRouter(jwtSecret, _sessions) {
         $set: { nftActiveInitialized: true },
       }, { new: true }).select('activeNftIds')
 
-      console.log(`NFT active-toggle: user ${userId} set ${nftId} to ${active ? 'active' : 'inactive'}`)
       res.json({ activeIds: updatedUser.activeNftIds ?? [] })
     } catch (error) {
       console.error(`NFT active-toggle failed for user ${userId}, nft ${nftId}:`, error)
@@ -406,8 +405,6 @@ export function createNftRouter(jwtSecret, _sessions) {
               transactionStatus: 'completed',
               ownershipStatus: 'owned',
             })
-
-            console.log(`NFT purchase completed: user ${userId} bought ${nftId} for ${nft.price} LSVP`)
 
             return {
               message: `Purchased ${nft.name}!`,

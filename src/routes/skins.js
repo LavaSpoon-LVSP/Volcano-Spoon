@@ -340,7 +340,6 @@ export function createSkinsRouter(jwtSecret, sessions) {
             throw error
           }
 
-          console.log(`Skin purchase completed: user ${userId} bought ${skinId} for ${skin.price} LSVP`)
           return skinResponse(updatedUser)
         },
         getGrantedResponse: async () => {
@@ -402,7 +401,6 @@ export function createSkinsRouter(jwtSecret, sessions) {
 
       syncLiveSession(userId, { equippedSkinId: updatedUser.equippedSkinId })
 
-      console.log(`Skin equip: user ${userId} equipped ${skinId} (spriteKey: ${skin.spriteKey})`)
       res.json({ equippedSpriteKey: updatedUser.equippedSkinId })
     } catch (error) {
       console.error(`Skin equip failed for user ${userId}, skin ${skinId}:`, error)

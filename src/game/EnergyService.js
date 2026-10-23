@@ -38,8 +38,12 @@ function dateKeyInTimezone(date, timeZone) {
  * regen ticks that have accumulated since the last settle). Returns null if
  * nothing needs to change.
  */
-function computeSettlement(user, config, now) {
+export function computeSettlement(user, config, now) {
   const maxEnergy = config.maxEnergy
+  const dailyFreeLimit = config.dailyFreeEnergyLimit ?? 50
+  const currentFreeToday = typeof user.freeEnergyToday === 'number'
+    ? user.freeEnergyToday
+    : Math.min(dailyFreeLimit, user.energy ?? maxEnergy)
 
   // ── Daily reset (checked first — a fresh day always wins over regen
   // math, and resets energyLastRegenAt too so regen starts counting fresh
@@ -50,6 +54,7 @@ function computeSettlement(user, config, now) {
     if (todayKey !== lastResetKey) {
       return {
         energy: maxEnergy,
+        freeEnergyToday: Math.min(maxEnergy, dailyFreeLimit),
         energyLastRegenAt: now,
         energyLastDailyResetAt: now,
         resetHappened: true,
@@ -57,22 +62,30 @@ function computeSettlement(user, config, now) {
     }
   }
 
-  // ── Passive regen: +1 every regenIntervalMinutes, capped at maxEnergy ──
+  // ── Passive regen: +1 every regenIntervalMinutes, capped at maxEnergy
+  // AND capped at dailyFreeEnergyLimit (up to 50 free Energy per day) ──
   if (config.regenEnabled && user.energy < maxEnergy) {
-    const intervalMs = Math.max(1, config.regenIntervalMinutes) * 60000
-    const lastRegenAt = user.energyLastRegenAt ? new Date(user.energyLastRegenAt).getTime() : now
-    const elapsedMs = now - lastRegenAt
-    const ticks = Math.floor(elapsedMs / intervalMs)
-    if (ticks > 0) {
-      const newEnergy = Math.min(maxEnergy, user.energy + ticks)
-      // Preserve the remainder toward the next tick (advance by exactly
-      // `ticks * intervalMs`, not to `now`) — UNLESS the tank is now full,
-      // in which case there's nothing to keep counting toward.
-      const newLastRegenAt = newEnergy >= maxEnergy ? now : lastRegenAt + ticks * intervalMs
-      return {
-        energy: newEnergy,
-        energyLastRegenAt: newLastRegenAt,
-        regenTicks: ticks,
+    const remainingFreeToday = Math.max(0, dailyFreeLimit - currentFreeToday)
+    if (remainingFreeToday > 0) {
+      const intervalMs = Math.max(1, config.regenIntervalMinutes) * 60000
+      const lastRegenAt = user.energyLastRegenAt ? new Date(user.energyLastRegenAt).getTime() : now
+      const elapsedMs = now - lastRegenAt
+      const ticks = Math.floor(elapsedMs / intervalMs)
+      if (ticks > 0) {
+        const neededForMax = maxEnergy - user.energy
+        const ticksToGrant = Math.min(ticks, remainingFreeToday, neededForMax)
+        if (ticksToGrant > 0) {
+          const newEnergy = user.energy + ticksToGrant
+          const newFreeToday = currentFreeToday + ticksToGrant
+          const reachedLimit = newEnergy >= maxEnergy || newFreeToday >= dailyFreeLimit
+          const newLastRegenAt = reachedLimit ? now : lastRegenAt + ticksToGrant * intervalMs
+          return {
+            energy: newEnergy,
+            freeEnergyToday: newFreeToday,
+            energyLastRegenAt: newLastRegenAt,
+            regenTicks: ticksToGrant,
+          }
+        }
       }
     }
   }
@@ -97,22 +110,23 @@ export async function settleUserEnergy(userId) {
   // 30 minutes on every refresh" bug this backfill fixes. Once backfilled
   // below, the real stored timestamp is used from then on.
   const [rawUser, config] = await Promise.all([
-    User.findById(userId).select('energy energyLastRegenAt energyLastDailyResetAt unlimitedEnergyUntil').lean(),
+    User.findById(userId).select('energy freeEnergyToday energyLastRegenAt energyLastDailyResetAt unlimitedEnergyUntil').lean(),
     getEnergyConfig(),
   ])
   if (!rawUser) return null
 
   const now = Date.now()
-  const needsBackfill = rawUser.energyLastRegenAt == null || rawUser.energyLastDailyResetAt == null || rawUser.energy == null
+  const needsBackfill = rawUser.energyLastRegenAt == null || rawUser.energyLastDailyResetAt == null || rawUser.energy == null || rawUser.freeEnergyToday == null
   let user = rawUser
 
   if (needsBackfill) {
     const backfill = {}
     if (rawUser.energy == null) backfill.energy = config.maxEnergy
+    if (rawUser.freeEnergyToday == null) backfill.freeEnergyToday = Math.min(config.dailyFreeEnergyLimit ?? 50, rawUser.energy ?? config.maxEnergy)
     if (rawUser.energyLastRegenAt == null) backfill.energyLastRegenAt = new Date(now)
     if (rawUser.energyLastDailyResetAt == null) backfill.energyLastDailyResetAt = new Date(now)
     const updated = await User.findByIdAndUpdate(userId, { $set: backfill }, { new: true })
-      .select('energy energyLastRegenAt energyLastDailyResetAt unlimitedEnergyUntil')
+      .select('energy freeEnergyToday energyLastRegenAt energyLastDailyResetAt unlimitedEnergyUntil')
       .lean()
     user = updated || { ...rawUser, ...backfill }
   }
@@ -120,6 +134,7 @@ export async function settleUserEnergy(userId) {
   const settlement = computeSettlement(user, config, now)
 
   let energy = user.energy
+  let freeEnergyToday = user.freeEnergyToday ?? Math.min(config.dailyFreeEnergyLimit ?? 50, user.energy ?? config.maxEnergy)
   let unlimitedEnergyUntil = user.unlimitedEnergyUntil
 
   if (settlement) {
@@ -144,13 +159,15 @@ export async function settleUserEnergy(userId) {
           energy: settlement.energy,
           energyLastRegenAt: new Date(settlement.energyLastRegenAt),
           ...(settlement.energyLastDailyResetAt ? { energyLastDailyResetAt: new Date(settlement.energyLastDailyResetAt) } : {}),
+          ...(settlement.freeEnergyToday !== undefined ? { freeEnergyToday: settlement.freeEnergyToday } : {}),
         },
       },
       { new: true }
-    ).select('energy energyLastRegenAt unlimitedEnergyUntil')
+    ).select('energy freeEnergyToday energyLastRegenAt unlimitedEnergyUntil')
 
     if (updated) {
       energy = updated.energy
+      freeEnergyToday = updated.freeEnergyToday
       unlimitedEnergyUntil = updated.unlimitedEnergyUntil
       if (settlement.resetHappened) {
         EnergyTransaction.create({ userId, type: 'daily_reset', energyAfter: energy }).catch(() => {})
@@ -159,9 +176,10 @@ export async function settleUserEnergy(userId) {
       // Lost the race — read the current, post-concurrent-write state
       // instead of reporting this now-stale computed settlement back to
       // the caller.
-      const fresh = await User.findById(userId).select('energy energyLastRegenAt unlimitedEnergyUntil').lean()
+      const fresh = await User.findById(userId).select('energy freeEnergyToday energyLastRegenAt unlimitedEnergyUntil').lean()
       if (fresh) {
         energy = fresh.energy
+        freeEnergyToday = fresh.freeEnergyToday
         unlimitedEnergyUntil = fresh.unlimitedEnergyUntil
       }
     }
@@ -169,13 +187,17 @@ export async function settleUserEnergy(userId) {
 
   const unlimitedActive = Boolean(unlimitedEnergyUntil) && new Date(unlimitedEnergyUntil).getTime() > now
   const intervalMs = Math.max(1, config.regenIntervalMinutes) * 60000
-  const nextRegenAt = config.regenEnabled && energy < config.maxEnergy
+  const dailyFreeLimit = config.dailyFreeEnergyLimit ?? 50
+  const freeLimitReached = freeEnergyToday >= dailyFreeLimit
+  const nextRegenAt = config.regenEnabled && energy < config.maxEnergy && !freeLimitReached
     ? new Date((settlement ? settlement.energyLastRegenAt : (user.energyLastRegenAt ? new Date(user.energyLastRegenAt).getTime() : now)) + intervalMs)
     : null
 
   return {
     energy,
     maxEnergy: config.maxEnergy,
+    freeEnergyToday,
+    dailyFreeEnergyLimit: dailyFreeLimit,
     unlimitedActive,
     unlimitedEnergyUntil: unlimitedActive ? unlimitedEnergyUntil : null,
     nextRegenAt,

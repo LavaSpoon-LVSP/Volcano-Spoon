@@ -68,6 +68,14 @@ export function createArenaStagesRouter(jwtSecret, sessions) {
     return Array.from(new Set([1, ...stages])).sort((a, b) => a - b)
   }
 
+  // Highest Arena Stage that is actually playable today. Stages above this
+  // are shown as "Coming Soon" in the UI (the frontend reads `comingSoon`
+  // below instead of hardcoding a number). Default 4 matches the current
+  // content; raise ARENA_PLAYABLE_STAGES in the backend .env (up to the
+  // total stage count) as new arenas ship — no frontend change needed.
+  const parsedPlayable = Number.parseInt(process.env.ARENA_PLAYABLE_STAGES ?? '4', 10)
+  const PLAYABLE_ARENA_STAGES = Number.isFinite(parsedPlayable) ? parsedPlayable : 4
+
   function serializeStages(unlockedStages, currentStage, economy) {
     const maxUnlocked = Math.max(...unlockedStages, 1)
     return ARENA_STAGE_CONFIGS.map((cfg) => {
@@ -77,6 +85,7 @@ export function createArenaStagesRouter(jwtSecret, sessions) {
         name: cfg.name,
         unlocked,
         active: cfg.stage === currentStage,
+        comingSoon: cfg.stage > PLAYABLE_ARENA_STAGES,
         // Only the very next sequential stage is unlockable right now.
         isNextToUnlock: !unlocked && cfg.stage === maxUnlocked + 1,
         // Unlock fee is a ONE-TIME LSVP Token payment — null once unlocked.
@@ -357,6 +366,18 @@ export function createArenaStagesRouter(jwtSecret, sessions) {
       }
 
       const economy = await getArenaEconomyConfig()
+
+      if (sessions && (rewardMultiplier !== undefined || rareOrbChance !== undefined)) {
+        for (const session of sessions.values()) {
+          if (session?.game && (session.game.arenaStage === stage || !session.game.arenaStage)) {
+            session.game.stageConfig = {
+              lavaCoinMultiplier: economy.rewardMultipliers[String(stage)] ?? 1,
+              rareOrbChance: economy.rareOrbChances[String(stage)] ?? 0,
+            }
+          }
+        }
+      }
+
       res.json({
         stage,
         unlockCost: economy.unlockCosts[String(stage)] ?? null,

@@ -6,7 +6,8 @@ import { NftMint } from '../models/NftMint.js'
 import { LsvpPurchaseRequest } from '../models/LsvpPurchaseRequest.js'
 import { getLsvpBuyConfig, updateLsvpBuyConfig } from '../models/LsvpBuyConfig.js'
 import { SOLANA_NETWORK, adminPublicKey, connection, explorerTxUrl } from '../config/solana.js'
-import { scanAdminWalletNfts, transferNftFromAdmin } from '../solana/nftService.js'
+import { scanAdminWalletNfts, transferNftFromAdmin, isNftHeldByWallet } from '../solana/nftService.js'
+import { decideRetryAction } from '../solana/nftRetryDecision.js'
 import { transferLsvpFromAdmin, getAdminLsvpBalance, getTransferFinalStatus } from '../solana/tokenService.js'
 import { releaseLsvpDailyUsage, todayDateKey } from '../models/LsvpDailyUsage.js'
 import { requirePayoutsNotPaused, getPayoutConfig, setPayoutsPaused } from '../models/PayoutConfig.js'
@@ -237,7 +238,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
       const published = await NftMint.find({ collectionMintAddress, status: 'published' }).limit(count)
       await NftMint.updateMany(
         { _id: { $in: published.map((m) => m._id) } },
-        { $set: { status: 'in_admin_wallet', publishedAt: null } }
+        { $set: { status: 'in_admin_wallet', publishedAt: null, reservedBy: null, reservedUntil: null } }
       )
 
       const collection = await NftCollection.findOne({ collectionMintAddress })
@@ -341,6 +342,8 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
           collectionMintAddress: m.collectionMintAddress,
           owner: m.ownerUserId ? { id: String(m.ownerUserId._id), username: m.ownerUserId.username } : null,
           soldAt: m.soldAt,
+          lastAttemptSignature: m.lastTransferAttemptSignature || null,
+          retryInProgress: m.retryStatus === 'processing',
         })),
       })
     } catch (error) {
@@ -392,28 +395,44 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
         return res.status(400).json({ message: 'Owner no longer has a linked wallet — cannot retry' })
       }
 
-      let signature
+      // NEVER send blindly: first work out whether the earlier attempt
+      // already delivered the NFT (a missed confirmation looks exactly like
+      // a failure). See solana/nftRetryDecision.js.
+      let decision
       try {
-        signature = await transferNftFromAdmin(mint.mintAddress, owner.solanaWalletAddress)
-      } catch (transferError) {
-        // UNCERTAIN TRANSFER — see tokenService.js's sendSignedTransfer doc
-        // comment. Check the exact signature's real on-chain status before
-        // deciding this retry failed: if it actually landed, mark it
-        // resolved rather than leaving it retryable (which would risk
-        // sending the same NFT twice).
-        const status = await getTransferFinalStatus(transferError.signature)
-        if (status.success) {
-          signature = transferError.signature
-        } else if (status.landed === null) {
-          // Couldn't confirm either way right now — leave this OUT of
-          // 'transferFailed' retry rotation (stay 'processing') so a
-          // second retry click can't race an uncertain send.
-          console.error(`NFT retry-transfer uncertain for mint ${mint.mintAddress} (signature ${transferError.signature}):`, transferError)
-          return res.status(500).json({ message: 'Could not confirm this transfer — please check back shortly before retrying again.' })
-        } else {
-          await releaseRetryClaim()
-          console.error(`Retry transfer failed for mint ${req.params.mintAddress}:`, transferError)
-          return res.status(500).json({ message: transferError.message })
+        decision = await decideRetryAction({
+          lastSignature: mint.lastTransferAttemptSignature,
+          getTransferFinalStatus,
+          isHeldByOwner: () => isNftHeldByWallet(mint.mintAddress, owner.solanaWalletAddress),
+        })
+      } catch (checkError) {
+        decision = { action: 'uncertain', why: checkError.message }
+      }
+
+      if (decision.action === 'uncertain') {
+        // Nothing was sent, so releasing the claim is safe; the earlier
+        // attempt's signature is kept so the next retry can check it again,
+        // and an admin can RESOLVE it manually after checking an explorer.
+        console.error(`NFT retry-transfer uncertain for mint ${mint.mintAddress}: ${decision.why}`)
+        await releaseRetryClaim()
+        return res.status(409).json({ message: 'Could not confirm whether the earlier transfer landed — nothing was sent. Check the buyer wallet on a block explorer, then use RESOLVE if it arrived, or retry again shortly.' })
+      }
+
+      let signature = decision.signature || null
+      if (decision.action === 'send') {
+        try {
+          signature = await transferNftFromAdmin(mint.mintAddress, owner.solanaWalletAddress)
+        } catch (transferError) {
+          mint.lastTransferAttemptSignature = transferError.signature || mint.lastTransferAttemptSignature
+          const status = await getTransferFinalStatus(transferError.signature)
+          if (status.success) {
+            signature = transferError.signature
+          } else {
+            await mint.save()
+            await releaseRetryClaim()
+            console.error(`Retry transfer failed for mint ${req.params.mintAddress}:`, transferError)
+            return res.status(500).json({ message: transferError.message })
+          }
         }
       }
 
@@ -422,9 +441,42 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
       mint.retryStatus = null
       await mint.save()
 
-      res.json({ message: `Transferred ${mint.name} to ${owner.username}`, txSignature: signature, explorerUrl: explorerTxUrl(signature) })
+      res.json({
+        message: decision.action === 'send'
+          ? `Transferred ${mint.name} to ${owner.username}`
+          : `${mint.name} was already delivered to ${owner.username} (${decision.why}) — marked delivered, nothing was sent again`,
+        txSignature: signature,
+        explorerUrl: signature ? explorerTxUrl(signature) : null,
+      })
     } catch (error) {
       console.error(`Retry transfer failed for mint ${req.params.mintAddress}:`, error)
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /**
+   * POST /api/admin/blockchain/nft-mints/:mintAddress/resolve
+   * Body: { reason } (required). For a failed transfer an admin has verified
+   * by hand (for example the NFT is visible in the buyer wallet on a block
+   * explorer): clears the failed flag without sending anything and records
+   * who/why. Never sends a transfer.
+   */
+  router.post('/nft-mints/:mintAddress/resolve', auth, requireAdmin, async (req, res) => {
+    const reason = String(req.body?.reason || '').trim()
+    if (reason.length < 3) {
+      return res.status(400).json({ message: 'A reason is required (for example: "verified in buyer wallet on Solscan")' })
+    }
+    try {
+      const mint = await NftMint.findOneAndUpdate(
+        { mintAddress: req.params.mintAddress, status: 'sold', transferFailed: true, retryStatus: { $ne: 'processing' } },
+        { $set: { transferFailed: false, resolvedNote: `${new Date().toISOString()} by ${req.user?.username || req.user?.sub}: ${reason}`.slice(0, 500) } },
+        { new: true }
+      )
+      if (!mint) {
+        return res.status(409).json({ message: 'No failed transfer to resolve for this NFT (or a retry is in progress)' })
+      }
+      res.json({ message: `Marked ${mint.name} as resolved`, mintAddress: mint.mintAddress })
+    } catch (error) {
       res.status(500).json({ message: error.message })
     }
   })
@@ -748,6 +800,100 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
           createdAt: p.createdAt,
           stuckForMs: now - new Date(p.createdAt).getTime(),
         })),
+      })
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /**
+   * POST /api/admin/blockchain/undelivered-payments/:id/retry
+   * Admin only — retry applying the grant for an on-chain LSVP payment
+   * whose original grant failed or died mid-request (grantedAt: null).
+   */
+  router.post('/undelivered-payments/:id/retry', auth, requireAdmin, async (req, res) => {
+    const { id } = req.params
+    try {
+      const payment = await LsvpPayment.findById(id)
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment record not found' })
+      }
+
+      if (payment.grantedAt) {
+        return res.status(400).json({ message: `Payment has already been granted at ${payment.grantedAt.toISOString()}` })
+      }
+
+      // Claim payment atomically so it cannot be granted concurrently or twice
+      const claimed = await LsvpPayment.findOneAndUpdate(
+        { _id: payment._id, grantedAt: null },
+        { $set: { grantedAt: new Date() } },
+        { new: true }
+      )
+      if (!claimed) {
+        return res.status(400).json({ message: 'Payment was already granted by another request' })
+      }
+
+      let grantDetail = ''
+      if (payment.purpose === 'energy_purchase') {
+        const { purchaseEnergy } = await import('../game/EnergyService.js')
+        const energyResult = await purchaseEnergy(payment.user, payment.purposeRefId)
+        grantDetail = `Energy credited (${payment.purposeRefId}): ${energyResult.message || 'success'}`
+      } else if (payment.purpose === 'item_purchase') {
+        const { ItemInventory } = await import('../models/ItemInventory.js')
+        await ItemInventory.findOneAndUpdate(
+          { user: payment.user, item: payment.purposeRefId },
+          { $inc: { quantity: 1 } },
+          { upsert: true }
+        )
+        grantDetail = `Item ${payment.purposeRefId} credited to inventory`
+      } else if (payment.purpose === 'skin_purchase') {
+        await User.findByIdAndUpdate(payment.user, {
+          $addToSet: { purchasedSkins: payment.purposeRefId },
+        })
+        grantDetail = `Skin ${payment.purposeRefId} unlocked for user`
+      } else if (payment.purpose === 'jackpot_orb_purchase') {
+        await User.findByIdAndUpdate(payment.user, {
+          $inc: { jackpotOrbs: 1 },
+        })
+        grantDetail = `Jackpot orb credited to user`
+      } else if (payment.purpose === 'arena_stage_unlock') {
+        await User.findByIdAndUpdate(payment.user, {
+          $addToSet: { unlockedStages: Number(payment.purposeRefId) },
+        })
+        grantDetail = `Arena stage ${payment.purposeRefId} unlocked for user`
+      } else {
+        grantDetail = `Grant applied for purpose: ${payment.purpose}`
+      }
+
+      res.json({
+        message: `✔ Successfully granted: ${grantDetail}`,
+        payment: claimed,
+      })
+    } catch (error) {
+      await LsvpPayment.findByIdAndUpdate(id, { $set: { grantedAt: null } }).catch(() => {})
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /**
+   * POST /api/admin/blockchain/undelivered-payments/:id/resolve
+   * Admin only — mark an undelivered payment as resolved without running the
+   * automated grant (e.g. handled manually or refunded off-chain).
+   */
+  router.post('/undelivered-payments/:id/resolve', auth, requireAdmin, async (req, res) => {
+    const { id } = req.params
+    try {
+      const payment = await LsvpPayment.findOneAndUpdate(
+        { _id: id, grantedAt: null },
+        { $set: { grantedAt: new Date() } },
+        { new: true }
+      )
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment not found or already resolved' })
+      }
+      res.json({
+        message: '✔ Payment marked as resolved',
+        payment,
       })
     } catch (error) {
       res.status(500).json({ message: error.message })

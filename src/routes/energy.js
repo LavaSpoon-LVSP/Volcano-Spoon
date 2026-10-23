@@ -114,18 +114,25 @@ export function createEnergyRouter(jwtSecret, sessions) {
       // guard in place too as an explicit belt-and-suspenders check so a
       // purchase can never slip through at a full tank even if this
       // threshold is ever reconfigured above maxEnergy.
-      const ENERGY_PURCHASE_MAX_THRESHOLD = 5
       if (type === 'five' || type === 'ten') {
         const currentState = await settleUserEnergy(userId)
-        if (currentState && currentState.energy >= currentState.maxEnergy) {
-          return res.status(400).json({
-            message: `Energy is already full (${currentState.maxEnergy}/${currentState.maxEnergy}) — this purchase would not add anything.`,
-          })
-        }
-        if (currentState && currentState.energy > ENERGY_PURCHASE_MAX_THRESHOLD) {
-          return res.status(400).json({
-            message: `Your Energy needs to be ${ENERGY_PURCHASE_MAX_THRESHOLD} or below to buy 5 Energy or 10 Energy (currently ${currentState.energy}/${currentState.maxEnergy}).`,
-          })
+        if (currentState) {
+          const packAmount = type === 'five' ? 5 : 10
+          const maxEnergy = currentState.maxEnergy
+          const currentEnergy = currentState.energy
+
+          if (currentEnergy >= maxEnergy) {
+            return res.status(400).json({
+              message: `Energy is already full (${maxEnergy}/${maxEnergy}) — this purchase would not add anything.`,
+            })
+          }
+
+          if (currentEnergy + packAmount > maxEnergy) {
+            const wouldWaste = (currentEnergy + packAmount) - maxEnergy
+            return res.status(400).json({
+              message: `Purchase blocked: buying +${packAmount} Energy at ${currentEnergy}/${maxEnergy} would exceed maximum capacity and waste ${wouldWaste} Energy. Your Energy must be ${maxEnergy - packAmount} or below to buy +${packAmount} Energy.`,
+            })
+          }
         }
       }
 
@@ -256,6 +263,11 @@ export function createEnergyRouter(jwtSecret, sessions) {
           return res.status(400).json({ message: `Unknown timezone: ${tz}` })
         }
         patch.dailyResetTimezone = tz
+      }
+      if (body.dailyFreeEnergyLimit !== undefined) {
+        const n = Number(body.dailyFreeEnergyLimit)
+        if (!Number.isFinite(n) || n < 1) return res.status(400).json({ message: 'dailyFreeEnergyLimit must be at least 1' })
+        patch.dailyFreeEnergyLimit = Math.floor(n)
       }
       // Whole LSVP Tokens only — see utils/lsvpPricing.js.
       if (body.lsvpCostFive !== undefined) {

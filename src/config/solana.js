@@ -134,5 +134,5 @@ export function explorerTxUrl(signature) {
 }
 
 console.log(
-  `Solana config: network=${SOLANA_NETWORK} rpc=${resolveRpcUrl()} adminWallet=${adminPublicKey?.toBase58() ?? '(not set)'} lsvpMint=${lsvpMint?.toBase58() ?? '(not set)'}`
+  `Solana config: network=${SOLANA_NETWORK} rpcHost=${(() => { try { return new URL(resolveRpcUrl()).host } catch { return '(invalid)' } })()} adminWallet=${adminPublicKey?.toBase58() ?? '(not set)'} lsvpMint=${lsvpMint?.toBase58() ?? '(not set)'}`
 )

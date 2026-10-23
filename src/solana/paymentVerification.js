@@ -1,4 +1,5 @@
 import { PublicKey } from '@solana/web3.js'
+import bs58 from 'bs58'
 import { getAssociatedTokenAddress } from '@solana/spl-token'
 import { connection, adminPublicKey, requireLsvpMint } from '../config/solana.js'
 import { lsvpToBaseUnits, getLsvpProgramId } from './tokenService.js'
@@ -40,14 +41,39 @@ export async function verifyLsvpPayment({ txSignature, expectedAmountLsvp, payer
     return { ok: false, reason: 'Missing transaction signature' }
   }
 
+  // A Solana transaction signature is a base58 string that decodes to
+  // exactly 64 bytes. Reject anything else up front with a readable 400
+  // instead of letting the RPC client throw (which surfaced as a raw 500).
+  let signatureBytes
+  try {
+    signatureBytes = bs58.decode(txSignature)
+  } catch {
+    signatureBytes = null
+  }
+  if (!signatureBytes || signatureBytes.length !== 64) {
+    return { ok: false, reason: 'Invalid transaction signature. Please check it and try again.' }
+  }
+
+  let payer
+  try {
+    payer = payerWallet instanceof PublicKey ? payerWallet : new PublicKey(payerWallet)
+  } catch {
+    return { ok: false, reason: 'Invalid wallet address' }
+  }
+
   const lsvpMint = requireLsvpMint()
   const expectedBaseUnits = await lsvpToBaseUnits(expectedAmountLsvp)
-  const payer = payerWallet instanceof PublicKey ? payerWallet : new PublicKey(payerWallet)
 
-  const tx = await connection.getParsedTransaction(txSignature, {
-    commitment: 'confirmed',
-    maxSupportedTransactionVersion: 0,
-  })
+  let tx
+  try {
+    tx = await connection.getParsedTransaction(txSignature, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    })
+  } catch (err) {
+    console.error('verifyLsvpPayment: RPC lookup failed:', err)
+    return { ok: false, reason: 'Could not look up this transaction right now. Please try again in a few seconds.' }
+  }
 
   if (!tx) {
     return { ok: false, reason: 'Transaction not found (it may not be confirmed yet — try again in a few seconds)' }

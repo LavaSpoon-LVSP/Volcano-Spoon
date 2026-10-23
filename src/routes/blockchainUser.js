@@ -16,6 +16,7 @@ import { requirePayoutsNotPaused } from '../models/PayoutConfig.js'
 import { isValidSolanaAddress, linkWalletAddress } from '../solana/walletAddress.js'
 import { SOLANA_NETWORK, lsvpMint } from '../config/solana.js'
 import { verifyLsvpPayment, getAdminLsvpDepositAddress } from '../solana/paymentVerification.js'
+import { reserveMint, releaseReservation, claimMintForSale, stockSummary, RESERVATION_TTL_MS } from '../solana/nftReservation.js'
 import { transferLsvpFromAdmin, getWalletLsvpBalance, getLsvpProgramId, getTransferFinalStatus } from '../solana/tokenService.js'
 import { TOKEN_2022_PROGRAM_ID } from '@solana/spl-token'
 import { transferNftFromAdmin } from '../solana/nftService.js'
@@ -213,18 +214,20 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
 
       const result = []
       for (const collection of collections) {
-        const availableCount = await NftMint.countDocuments({
-          collectionMintAddress: collection.collectionMintAddress,
-          status: 'published',
-        })
-        if (availableCount === 0) continue
+        const stock = await stockSummary({ NftMint, collectionMintAddress: collection.collectionMintAddress, userId })
+        // Hide a collection only when nothing is for sale AND nothing is
+        // being held for a buyer (a held copy may come back if they cancel).
+        if (stock.availableToMe === 0 && stock.reservedByOthers === 0) continue
 
         result.push({
           collectionMintAddress: collection.collectionMintAddress,
           name: collection.name,
           image: collection.image,
           priceLsvp: collection.priceLsvp,
-          availableCount,
+          availableCount: stock.availableToMe,
+          reservedByOthers: stock.reservedByOthers,
+          reservedByMe: stock.reservedByMe > 0,
+          allReserved: stock.availableToMe === 0 && stock.reservedByOthers > 0,
           alreadyOwned: ownedCollectionAddresses.has(collection.collectionMintAddress),
         })
       }
@@ -288,6 +291,56 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
    * LSVP payment is refunded on-chain automatically — the player is never
    * left having paid for nothing.
    */
+  /**
+   * POST /api/blockchain/nft-collections/:collectionMintAddress/reserve
+   * Auth required — hold ONE copy for this player while they pay
+   * (RESERVATION_TTL_MS, default 3 min). The client calls this BEFORE asking
+   * the wallet to sign, so the "Reserved" state the player sees is real: the
+   * copy is taken off sale for everyone else until it is bought, released or
+   * expires. Calling it again extends the player's own hold.
+   */
+  router.post('/nft-collections/:collectionMintAddress/reserve', auth, async (req, res) => {
+    const userId = req.user.sub
+    const { collectionMintAddress } = req.params
+    try {
+      const collection = await NftCollection.findOne({ collectionMintAddress })
+      if (!collection || collection.priceLsvp === null) {
+        return res.status(404).json({ message: 'Collection not found or not for sale' })
+      }
+      if (await NftMint.exists({ collectionMintAddress, ownerUserId: userId, status: 'sold' })) {
+        return res.status(409).json({ message: 'You already own an NFT from this collection' })
+      }
+      const reservation = await reserveMint({ NftMint, collectionMintAddress, userId })
+      if (!reservation) {
+        const stock = await stockSummary({ NftMint, collectionMintAddress, userId })
+        return res.status(stock.reservedByOthers > 0 ? 409 : 400).json({
+          message: stock.reservedByOthers > 0
+            ? 'Every remaining copy is currently reserved by other buyers. Try again in a few minutes.'
+            : 'This collection is sold out',
+        })
+      }
+      res.json({
+        reserved: true,
+        collectionMintAddress,
+        reservedUntil: reservation.reservedUntil,
+        ttlSeconds: Math.round(RESERVATION_TTL_MS / 1000),
+        priceLsvp: collection.priceLsvp,
+      })
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /** POST /api/blockchain/nft-collections/:collectionMintAddress/release — give the copy back (payment cancelled or failed). */
+  router.post('/nft-collections/:collectionMintAddress/release', auth, async (req, res) => {
+    try {
+      await releaseReservation({ NftMint, collectionMintAddress: req.params.collectionMintAddress, userId: req.user.sub })
+      res.json({ released: true })
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
   router.post('/nft-collections/:collectionMintAddress/purchase', auth, async (req, res) => {
     const userId = req.user.sub
     const { collectionMintAddress } = req.params
@@ -316,9 +369,13 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
         return res.status(409).json({ message: 'You already own an NFT from this collection' })
       }
 
-      const hasStock = await NftMint.exists({ collectionMintAddress, status: 'published' })
-      if (!hasStock) {
-        return res.status(400).json({ message: 'This collection is sold out' })
+      const stockNow = await stockSummary({ NftMint, collectionMintAddress, userId })
+      if (stockNow.availableToMe === 0) {
+        return res.status(stockNow.reservedByOthers > 0 ? 409 : 400).json({
+          message: stockNow.reservedByOthers > 0
+            ? 'Every remaining copy is currently reserved by other buyers. Try again in a few minutes.'
+            : 'This collection is sold out',
+        })
       }
 
       const verification = await verifyLsvpPayment({
@@ -343,11 +400,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
         // player empty-handed.
         let mint
         try {
-          mint = await NftMint.findOneAndUpdate(
-            { collectionMintAddress, status: 'published' },
-            { $set: { status: 'sold', ownerUserId: userId, soldAt: new Date() } },
-            { new: true }
-          )
+          mint = await claimMintForSale({ NftMint, collectionMintAddress, userId })
         } catch (raceError) {
           if (raceError?.code !== 11000) throw raceError
           mint = null
@@ -388,6 +441,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
           await mint.save()
         } catch (transferError) {
           const status = await getTransferFinalStatus(transferError.signature)
+          mint.lastTransferAttemptSignature = transferError.signature || null
           if (status.success) {
             mint.transferSignature = transferError.signature
             mint.transferFailed = false
@@ -403,8 +457,14 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
           body: {
             message: mint.transferFailed
               ? `Purchased ${mint.name}! The on-chain transfer is still finishing — it'll arrive in your wallet shortly.`
-              : `Purchased ${mint.name}!`,
-            mint: { mintAddress: mint.mintAddress, name: mint.name, image: mint.image, transferPending: mint.transferFailed },
+              : `Purchased ${mint.name}! Delivered to your wallet on-chain.`,
+            mint: {
+              mintAddress: mint.mintAddress,
+              name: mint.name,
+              image: mint.image,
+              transferPending: mint.transferFailed,
+              transferStatus: mint.transferFailed ? 'failed' : mint.transferSignature ? 'delivered' : 'pending',
+            },
           },
         }
       }
@@ -426,7 +486,13 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
             status: 200,
             body: {
               message: `Purchased ${mint.name}!`,
-              mint: { mintAddress: mint.mintAddress, name: mint.name, image: mint.image, transferPending: mint.transferFailed },
+              mint: {
+                mintAddress: mint.mintAddress,
+                name: mint.name,
+                image: mint.image,
+                transferPending: mint.transferFailed,
+                transferStatus: mint.transferFailed ? 'failed' : mint.transferSignature ? 'delivered' : 'pending',
+              },
             },
           }
         },

@@ -280,8 +280,6 @@ export function createJackpotRouter(jwtSecret, sessions) {
           lsvpSpent: cost,
         })
 
-        console.log(`Jackpot Orb purchased: user ${userId} paid ${cost} LSVP on-chain, now owns ${updatedUser.jackpotOrbs}`)
-
         return {
           jackpotOrbs: updatedUser.jackpotOrbs,
           message: 'Jackpot Orb purchased!',
@@ -456,8 +454,6 @@ export function createJackpotRouter(jwtSecret, sessions) {
         claimStatus: rewardType === 'lsvp' || rewardType === 'nft' ? 'unclaimed' : 'not_applicable',
       })
 
-      console.log(`Jackpot Orb used: user ${userId} drew ${rewardType}`, rewardDetail)
-
       res.json({
         rewardType,
         rewardDetail,
@@ -594,7 +590,7 @@ export function createJackpotRouter(jwtSecret, sessions) {
             message: 'Your reward is confirmed and safely on hold while the reward pool is topped up — no action needed, it will be paid once an admin releases it.',
           })
         }
-        return res.status(409).json({ message: `This reward has already been ${existing.claimStatus}` })
+        return res.status(409).json({ message: 'This reward is already being processed.' })
       }
 
       const releaseBackToUnclaimed = () =>

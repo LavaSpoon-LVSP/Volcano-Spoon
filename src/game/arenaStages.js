@@ -82,12 +82,6 @@ const STAGE_LAUNCH_IMPULSE = {
   1: 1.0, 2: 1.25, 3: 1.25, 4: 1.30, 5: 1.30, 6: 1.35, 7: 1.35, 8: 1.40,
 }
 
-/** How many hazards may run at once. Stage 5's "multiple hazards" and
- * Stage 6's "combined hazards" are this going above 1. */
-const STAGE_CONCURRENT_HAZARDS = {
-  1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 3, 8: 3,
-}
-
 function clampStage(stage) {
   const n = Number(stage)
   if (!Number.isFinite(n)) return MIN_ARENA_STAGE
@@ -112,7 +106,6 @@ export function getStageProfile(stage) {
     lightHazardCountMultiplier:     STAGE_LIGHT_HAZARD_COUNT[s] ?? 1,
     fireWallBoost:                  STAGE_FIRE_WALL_BOOST[s] ?? 1,
     launchImpulseMultiplier:        STAGE_LAUNCH_IMPULSE[s] ?? 1,
-    maxConcurrentHazards:           STAGE_CONCURRENT_HAZARDS[s] ?? 1,
   }
 }
 
@@ -138,25 +131,38 @@ export function getStageProfile(stage) {
 // `.stage`, `.name`, and `.availablePowerups` are ever read (both in
 // routes/arenaStages.js).
 import {
-  SHIELD_MIN_ARENA_STAGE, COMBO_MIN_ARENA_STAGE, MAGNET_MIN_ARENA_STAGE,
-  ROSE_MIN_ARENA_STAGE, HEALTH_MIN_ARENA_STAGE, FREEZE_MIN_ARENA_STAGE,
-  GRAVITY_MIN_ARENA_STAGE,
+  TURBO_MIN_ARENA_STAGE,
+  SHIELD_MIN_ARENA_STAGE, COMBO_MIN_ARENA_STAGE, ROSE_MIN_ARENA_STAGE,
+  MAGNET_MIN_ARENA_STAGE, BLACK_MIN_ARENA_STAGE, DIAMOND_MIN_ARENA_STAGE,
+  FREEZE_MIN_ARENA_STAGE, CHAOS_MIN_ARENA_STAGE, SUN_FLAME_MIN_ARENA_STAGE,
+  ELECTRIC_MIN_ARENA_STAGE, GRAVITY_MIN_ARENA_STAGE, MYTHIC_MIN_ARENA_STAGE,
+  JACKPOT_MIN_ARENA_STAGE,
 } from './constants.js'
 
-// Every powerup-style orb currently in the game, in unlock order — kept in
-// sync with OrbSystem's own POWERUP_STAGE_GATES via these same
+// Every powerup/special orb currently in the game, in unlock order — kept in
+// sync with OrbSystem's own ORB_STAGE_GATES via these same
 // *_MIN_ARENA_STAGE constants, so this list and what can actually spawn
 // can never drift apart.
-const ALL_POWERUP_TYPES = ['shield', 'combo', 'magnet', 'rose', 'health', 'freeze', 'gravity']
+const ALL_POWERUP_TYPES = [
+  'turbo', 'shield', 'combo', 'rose', 'magnet', 'black', 'diamond',
+  'freeze', 'chaos', 'sun_flame', 'electric', 'gravity', 'mythic', 'jackpot',
+]
 
 const POWERUP_MIN_STAGE = {
-  shield: SHIELD_MIN_ARENA_STAGE,
-  combo: COMBO_MIN_ARENA_STAGE,
-  magnet: MAGNET_MIN_ARENA_STAGE,
-  rose: ROSE_MIN_ARENA_STAGE,
-  health: HEALTH_MIN_ARENA_STAGE,
-  freeze: FREEZE_MIN_ARENA_STAGE,
-  gravity: GRAVITY_MIN_ARENA_STAGE,
+  turbo:     TURBO_MIN_ARENA_STAGE,
+  shield:    SHIELD_MIN_ARENA_STAGE,
+  combo:     COMBO_MIN_ARENA_STAGE,
+  rose:      ROSE_MIN_ARENA_STAGE,
+  magnet:    MAGNET_MIN_ARENA_STAGE,
+  black:     BLACK_MIN_ARENA_STAGE,
+  diamond:   DIAMOND_MIN_ARENA_STAGE,
+  freeze:    FREEZE_MIN_ARENA_STAGE,
+  chaos:     CHAOS_MIN_ARENA_STAGE,
+  sun_flame: SUN_FLAME_MIN_ARENA_STAGE,
+  electric:  ELECTRIC_MIN_ARENA_STAGE,
+  gravity:   GRAVITY_MIN_ARENA_STAGE,
+  mythic:    MYTHIC_MIN_ARENA_STAGE,
+  jackpot:   JACKPOT_MIN_ARENA_STAGE,
 }
 
 function stagePowerupRoster(stage) {

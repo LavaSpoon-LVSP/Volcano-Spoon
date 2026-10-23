@@ -47,6 +47,15 @@ const runResultSchema = new mongoose.Schema(
     jackpotTokensCollected: { type: Number, default: 0 },
     xpEarned: { type: Number, default: 0 },
 
+    // 15 Oct 2026 checklist review, bug 5: server-replayed (never
+    // client-claimed — see ReplayEngine.js) max combo and survival time for
+    // this round, kept so badges.js can verify a badge claim against a
+    // player's own confirmed rounds instead of trusting the client.
+    maxCombo: { type: Number, default: 0 },
+    survivalMs: { type: Number, default: 0 },
+    jackpotOrbCollected: { type: Boolean, default: false },
+    mythicOrbCollected: { type: Boolean, default: false },
+
     // Round-start snapshot this round was settled under (see S2 in the
     // handover doc: never the session's live/current values at save time).
     arenaStage: { type: Number, default: 1 },

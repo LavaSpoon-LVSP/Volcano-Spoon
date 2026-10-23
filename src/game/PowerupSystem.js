@@ -6,7 +6,7 @@ import {
   TURBO_DURATION_MS, TURBO_COMBO_MULTIPLIER,
   MAGNET_DURATION_MS, FREEZE_DURATION_MS, FREEZE_SPEED_FACTOR,
   SHIELD_ORB_DURATION_MS, SHIELD_ORB_HITS,
-  GRAVITY_ORB_DURATION_MS, GRAVITY_REDUCTION_FACTOR,
+  GRAVITY_ORB_DURATION_MS, GRAVITY_REDUCTION_FACTOR, GRAVITY_DIRECT_CONTROL_MS,
 } from './constants.js'
 import { now as simTime } from './simClock.js'
 
@@ -24,6 +24,8 @@ export class PowerupSystem {
     this.freezeActive     = false; this.freezeUntil     = 0
     this.shieldActive     = false; this.shieldUntil     = 0; this.shieldHitsLeft = 0
     this.gravityActive    = false; this.gravityUntil    = 0
+    this.gravityControlUntil = 0
+    this._now = 0   // last time seen by activate()/update(), so getModifiers() needs no separate clock read
     this.invincibleActive = false; this.invincibleUntil = 0
     this.reverseActive    = false; this.reverseUntil    = 0
     this.speedSpikeActive = false; this.speedSpikeUntil = 0
@@ -31,13 +33,14 @@ export class PowerupSystem {
 
   activate(type, chaosEffect, now) {
     const t = now ?? simTime()
+    this._now = t
     let immediate = { scoreBoost: 0, orbRain: 0, hazardBurst: false }
     switch (type) {
       case 'turbo':   this.turboActive = true;   this.turboUntil   = t + TURBO_DURATION_MS; break
       case 'magnet':  this.magnetActive = true;  this.magnetUntil  = t + MAGNET_DURATION_MS; break
       case 'freeze':  this.freezeActive = true;  this.freezeUntil  = t + FREEZE_DURATION_MS; break
       case 'shield':  this.shieldActive = true;  this.shieldUntil  = t + SHIELD_ORB_DURATION_MS; this.shieldHitsLeft = SHIELD_ORB_HITS; break
-      case 'gravity': this.gravityActive = true; this.gravityUntil = t + GRAVITY_ORB_DURATION_MS; break
+      case 'gravity': this.gravityActive = true; this.gravityUntil = t + GRAVITY_ORB_DURATION_MS; this.gravityControlUntil = t + GRAVITY_DIRECT_CONTROL_MS; break
       case 'chaos':   immediate = this._applyChaos(chaosEffect, t); break
     }
     return immediate
@@ -51,6 +54,7 @@ export class PowerupSystem {
   }
 
   update(now) {
+    this._now = now
     if (this.turboActive      && now >= this.turboUntil)      this.turboActive      = false
     if (this.magnetActive     && now >= this.magnetUntil)     this.magnetActive     = false
     if (this.freezeActive     && now >= this.freezeUntil)     this.freezeActive     = false
@@ -61,8 +65,15 @@ export class PowerupSystem {
     if (this.speedSpikeActive && now >= this.speedSpikeUntil) this.speedSpikeActive = false
   }
 
+  /** True while the Gravity Orb's 3 s direct-control window is open. */
+  isGravityControlActive(now) {
+    const t = now ?? this._now
+    return this.gravityActive && t < this.gravityControlUntil
+  }
+
   getModifiers() {
     return {
+      gravityControlActive: this.gravityActive && this._now < this.gravityControlUntil,
       gravityFactor:   this.gravityActive    ? GRAVITY_REDUCTION_FACTOR : 1.0,
       airControlBonus: this.turboActive      ? 1.5  : 1.0,
       reverseControls: this.reverseActive,
@@ -87,6 +98,7 @@ export class PowerupSystem {
       freeze:     this.freezeActive     ? rem(this.freezeUntil)     : 0,
       shield:     this.shieldActive     ? rem(this.shieldUntil)     : 0,
       gravity:    this.gravityActive    ? rem(this.gravityUntil)    : 0,
+      gravityControl: this.isGravityControlActive(t) ? rem(this.gravityControlUntil) : 0,
       invincible: this.invincibleActive ? rem(this.invincibleUntil) : 0,
       reverse:    this.reverseActive    ? rem(this.reverseUntil)    : 0,
     }

@@ -50,6 +50,17 @@ const energyConfigSchema = new mongoose.Schema(
       default: 'UTC',
     },
 
+    // ── Free daily allowance cap (default 50 free Energy per day) ──
+    dailyFreeEnergyLimit: {
+      type: Number,
+      default: 50,
+      min: 1,
+      validate: {
+        validator: Number.isInteger,
+        message: 'must be a whole number of Energy',
+      },
+    },
+
     // ── LSVP purchase costs (never hardcoded in route code) ──
     // Whole LSVP Tokens only — validated here (schema level) and again in
     // routes/energy.js's PUT /admin/config (request level) via
@@ -114,7 +125,7 @@ export async function updateEnergyConfig(patch) {
   const $set = {}
   const fields = [
     'maxEnergy', 'regenEnabled', 'regenIntervalMinutes',
-    'dailyResetEnabled', 'dailyResetTimezone',
+    'dailyResetEnabled', 'dailyResetTimezone', 'dailyFreeEnergyLimit',
     'lsvpCostFive', 'lsvpCostTen', 'lsvpCostUnlimitedHour',
   ]
   for (const field of fields) {

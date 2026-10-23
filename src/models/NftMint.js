@@ -94,6 +94,38 @@ const nftMintSchema = new mongoose.Schema(
       enum: ['processing', null],
       default: null,
     },
+
+    // SERVER-SIDE RESERVATION (checklist F3, "Reserved" state). While a
+    // player is paying for one copy of a collection, that single published
+    // mint is held for them so a second buyer can't be shown (or sold) the
+    // same last copy. Set by POST /nft-collections/:addr/reserve, cleared
+    // on release, on sale, or by simply expiring (reservedUntil in the
+    // past counts as unreserved — no cleanup job needed). See
+    // solana/nftReservation.js.
+    reservedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    reservedUntil: {
+      type: Date,
+      default: null,
+    },
+
+    // Signature of the most recent on-chain send attempt for this NFT,
+    // kept even when that attempt errored, so an admin retry can look up
+    // whether it actually landed before sending again (never double-send).
+    lastTransferAttemptSignature: {
+      type: String,
+      default: null,
+    },
+
+    // Set when an admin manually resolves a failed transfer (after
+    // verifying delivery on a block explorer): who, when and why.
+    resolvedNote: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -106,6 +138,8 @@ const nftMintSchema = new mongoose.Schema(
 // even if both passed the pre-purchase ownership check at the same instant.
 // Partial (only applies to status:'sold') so many NftMint documents can
 // share a null ownerUserId without tripping the uniqueness constraint.
+nftMintSchema.index({ collectionMintAddress: 1, status: 1, reservedUntil: 1 })
+
 nftMintSchema.index(
   { collectionMintAddress: 1, ownerUserId: 1 },
   { unique: true, partialFilterExpression: { status: 'sold' } }

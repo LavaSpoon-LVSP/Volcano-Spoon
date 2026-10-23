@@ -224,3 +224,18 @@ export async function transferNftFromAdmin(mintAddress, destinationWallet) {
   // account).
   return sendSignedTransfer(admin, [instruction])
 }
+
+
+/**
+ * True when `ownerWallet` already holds this 1-of-1 NFT on-chain. Used by the
+ * admin retry before it sends anything: a transfer whose confirmation was
+ * missed (watcher/RPC hiccup) may already be in the buyer's wallet, and
+ * sending again would fail or, worse, double-handle the token.
+ */
+export async function isNftHeldByWallet(mintAddress, ownerWallet) {
+  const accounts = await connection.getParsedTokenAccountsByOwner(
+    new PublicKey(ownerWallet),
+    { mint: new PublicKey(mintAddress) }
+  )
+  return accounts.value.some((a) => Number(a.account.data.parsed?.info?.tokenAmount?.uiAmount ?? 0) >= 1)
+}
