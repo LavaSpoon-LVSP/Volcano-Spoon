@@ -54,6 +54,7 @@ const DEFAULT_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
+  'https://game.lavaspoon.com',
   'https://volcanospoonv7.infinity-staging.site',
   'https://adminvolcanospoonv2.infinity-staging.site',
   'https://volcanospoonv5.infinity-staging.site',
