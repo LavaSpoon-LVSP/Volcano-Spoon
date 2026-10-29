@@ -94,9 +94,11 @@ openssl rand -hex 32
 | Variable | Required | Notes |
 |---|---|---|
 | `FRONTEND_URL` | No (defaults to `http://localhost:5173`) | Origin the `POST /auth/forgot-password` reset link points at — wherever the frontend's reset-password page is served from. |
-| `MAIL_TRANSPORT` | No (defaults to `console`) | `smtp` for real delivery, `console` to just log the email instead of sending it (useful for local dev with no mail server configured), `none` to drop it silently. See `src/mail/mailer.js`. |
+| `MAIL_TRANSPORT` | No (defaults to `console`) | `brevo` or `resend` for real delivery over HTTPS (works on Railway, which blocks SMTP on Free/Hobby plans), `smtp` for real delivery over SMTP, `console` to just log the email instead of sending it (useful for local dev with no mail server configured), `none` to drop it silently. See `src/mail/mailer.js`. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | Only if `MAIL_TRANSPORT=smtp` | Standard SMTP connection settings, passed straight to `nodemailer.createTransport`. |
-| `MAIL_FROM` | Only if `MAIL_TRANSPORT=smtp` | The `From:` address on outgoing reset emails. |
+| `BREVO_API_KEY` | Only if `MAIL_TRANSPORT=brevo` | Brevo API key (SMTP & API → API Keys). `MAIL_FROM` must be a sender verified in Brevo. |
+| `RESEND_API_KEY` | Only if `MAIL_TRANSPORT=resend` | Resend API key. `MAIL_FROM` must be on a domain verified in Resend. |
+| `MAIL_FROM` | Required for `smtp`, `brevo`, `resend` | The `From:` address on outgoing reset emails, e.g. `Volcano Spoon <no-reply@yourdomain.com>`. |
 
 ### Solana network selection
 

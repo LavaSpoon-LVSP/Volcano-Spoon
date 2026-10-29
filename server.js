@@ -54,14 +54,13 @@ const DEFAULT_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
-  'https://game.lavaspoon.com',
+  'https://volcanospoonv6.infinity-staging.site',
   'https://volcanospoonv7.infinity-staging.site',
   'https://adminvolcanospoonv2.infinity-staging.site',
   'https://volcanospoonv5.infinity-staging.site',
   'https://volcanospoonv12.infinity-staging.site',
   'https://volcanospoonv13.infinity-staging.site',
   'https://volcanospoonv18.infinity-staging.site',
-  'https://adminvolcano.infinity-staging.site'
 ]
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
@@ -294,16 +293,22 @@ app.post('/auth/forgot-password', forgotPasswordLimiter, async (req, res) => {
       // See Game.jsx's page-state initializer for where resetToken is read.
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
       const resetLink = `${frontendUrl.replace(/\/+$/, '')}/?resetToken=${rawToken}`
-      const mailResult = await sendMail({
+      // Deliberately NOT awaited: response time must not depend on the mail
+      // provider (slow/hung provider) or on whether the account exists.
+      // sendMail never rejects, but .catch is a belt-and-braces guard.
+      sendMail({
         to: user.email,
         subject: 'Reset your password',
         text: `Someone (hopefully you) requested a password reset. This link expires in 30 minutes and can only be used once:\n\n${resetLink}\n\nIf you didn't request this, you can ignore this email — your password hasn't been changed.`,
       })
-      if (!mailResult.ok) {
-        // Logged for the team, never surfaced to the client — see
-        // src/mail/mailer.js's header comment on why.
-        console.error('[auth] forgot-password mail send failed', { userId: String(user._id), error: mailResult.error })
-      }
+        .then((mailResult) => {
+          if (!mailResult.ok) {
+            // Logged for the team, never surfaced to the client — see
+            // src/mail/mailer.js's header comment on why.
+            console.error('[auth] forgot-password mail send failed', { userId: String(user._id), error: mailResult.error })
+          }
+        })
+        .catch((err) => console.error('[auth] forgot-password mail error', err))
     }
 
     return res.json(genericResponse)
