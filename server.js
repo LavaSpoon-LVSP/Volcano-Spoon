@@ -61,6 +61,7 @@ const DEFAULT_CORS_ORIGINS = [
   'https://volcanospoonv12.infinity-staging.site',
   'https://volcanospoonv13.infinity-staging.site',
   'https://volcanospoonv18.infinity-staging.site',
+  'https://game.lavaspoon.com',
 ]
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
