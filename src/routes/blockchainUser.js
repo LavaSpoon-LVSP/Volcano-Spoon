@@ -11,6 +11,7 @@ import { LsvpPurchaseRequest } from '../models/LsvpPurchaseRequest.js'
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { getLsvpBuyConfig } from '../models/LsvpBuyConfig.js'
 import { reserveLsvpDailyUsage, releaseLsvpDailyUsage, todayDateKey } from '../models/LsvpDailyUsage.js'
+import { reserveGlobalLsvpUsage, releaseGlobalLsvpUsage } from '../models/LsvpGlobalDailyUsage.js'
 import { createWalletLinkChallenge, claimWalletLinkChallenge } from '../models/WalletLinkChallenge.js'
 import { requirePayoutsNotPaused } from '../models/PayoutConfig.js'
 import { isValidSolanaAddress, linkWalletAddress } from '../solana/walletAddress.js'
@@ -37,6 +38,12 @@ import { transferNftFromAdmin } from '../solana/nftService.js'
 export function createBlockchainUserRouter(jwtSecret, sessions) {
   const router = express.Router()
   const auth = requireAuth(jwtSecret)
+
+  /** Releases BOTH the per-player and the global daily reservation made by POST /lsvp/buy. */
+  async function releaseBothUsage(userId, dateKey, amount) {
+    await releaseLsvpDailyUsage(userId, dateKey, amount)
+    await releaseGlobalLsvpUsage(dateKey, amount)
+  }
 
   function syncLiveSessionCoins(userId, coins) {
     const session = sessions?.get(String(userId))
@@ -93,6 +100,8 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
         coinsPerLsvp: buyConfig.coinsPerLsvp,
         approvalThresholdLsvp: buyConfig.approvalThresholdLsvp,
         dailyLimitLsvp: buyConfig.dailyLimitLsvp,
+        // Per-purchase hard cap, shown to players. (The global daily limit is intentionally NOT exposed.)
+        maxLsvpPerTransaction: buyConfig.maxLsvpPerTransaction,
       })
     } catch (error) {
       res.status(500).json({ message: error.message })
@@ -533,6 +542,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
     const userId = req.user.sub
     const lsvpAmount = Number(req.body?.lsvpAmount)
     let reservedDateKey = null
+    let reservedGlobal = false
 
     try {
       if (!Number.isInteger(lsvpAmount) || lsvpAmount <= 0) {
@@ -552,6 +562,12 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
       }
 
       const config = await getLsvpBuyConfig()
+
+      // Treasury protection: hard cap on a single purchase (admin-configurable).
+      if (lsvpAmount > config.maxLsvpPerTransaction) {
+        return res.status(400).json({ message: `The maximum purchase is ${config.maxLsvpPerTransaction} LSVP Tokens at a time` })
+      }
+
       const coinsSpent = lsvpAmount * config.coinsPerLsvp
 
       // Atomically RESERVE this purchase's amount against today's running
@@ -569,13 +585,18 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
       reservedDateKey = dateKey
       const totalTodayAfterThis = usage.totalLsvp
 
+      // Global (all players) daily reservation — same atomic reserve pattern.
+      const globalUsage = await reserveGlobalLsvpUsage(dateKey, lsvpAmount)
+      reservedGlobal = true
+      const wouldExceedGlobalLimit = globalUsage.totalLsvp >= config.globalDailyLimitLsvp
+
       // Needs admin approval if EITHER this one request alone clears the
       // per-request threshold, OR this reservation carried today's running
       // total to/over the daily limit. Once a player has crossed the daily
       // limit, every further purchase that day keeps needing approval,
       // whether it arrives as one big buy or many small ones.
       const wouldExceedDailyLimit = totalTodayAfterThis >= config.dailyLimitLsvp
-      const needsApproval = lsvpAmount >= config.approvalThresholdLsvp || wouldExceedDailyLimit
+      const needsApproval = lsvpAmount >= config.approvalThresholdLsvp || wouldExceedDailyLimit || wouldExceedGlobalLimit
 
       if (!needsApproval) {
         const chargedUser = await User.findOneAndUpdate(
@@ -585,7 +606,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
         ).select('coins')
 
         if (!chargedUser) {
-          await releaseLsvpDailyUsage(userId, dateKey, lsvpAmount)
+          await releaseBothUsage(userId, dateKey, lsvpAmount)
           return res.status(400).json({ message: 'Insufficient Lava Coin balance' })
         }
 
@@ -622,7 +643,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
             } else {
               const refunded = await User.findByIdAndUpdate(userId, { $inc: { coins: coinsSpent } }, { new: true }).select('coins')
               syncLiveSessionCoins(userId, refunded?.coins)
-              await releaseLsvpDailyUsage(userId, dateKey, lsvpAmount)
+              await releaseBothUsage(userId, dateKey, lsvpAmount)
               console.error(`LSVP purchase transfer failed for user ${userId} — coins refunded:`, transferError)
               return res.status(500).json({ message: `On-chain transfer failed: ${transferError.message} (coins refunded)` })
             }
@@ -646,7 +667,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
           if (existingForSignature) {
             const refunded = await User.findByIdAndUpdate(userId, { $inc: { coins: coinsSpent } }, { new: true }).select('coins')
             syncLiveSessionCoins(userId, refunded?.coins)
-            await releaseLsvpDailyUsage(userId, dateKey, lsvpAmount)
+            await releaseBothUsage(userId, dateKey, lsvpAmount)
             console.error(`LSVP purchase for user ${userId} collided with an already-recorded transfer (signature ${signature}, existing request ${existingForSignature._id}) — coins refunded, no new transfer was sent for this request.`)
             return res.status(409).json({
               message: 'This purchase collided with another in-flight request and did not send a new transfer — your coins have been refunded. Please try again.',
@@ -676,7 +697,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
             if (createError?.code === 11000) {
               const refunded = await User.findByIdAndUpdate(userId, { $inc: { coins: coinsSpent } }, { new: true }).select('coins')
               syncLiveSessionCoins(userId, refunded?.coins)
-              await releaseLsvpDailyUsage(userId, dateKey, lsvpAmount)
+              await releaseBothUsage(userId, dateKey, lsvpAmount)
               console.error(`LSVP purchase for user ${userId} lost a race on signature ${signature} (duplicate-key on create) — coins refunded, no new transfer was sent for this request.`)
               return res.status(409).json({
                 message: 'This purchase collided with another in-flight request and did not send a new transfer — your coins have been refunded. Please try again.',
@@ -718,7 +739,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
       }
 
       if (coinsSpent > (user.coins || 0)) {
-        await releaseLsvpDailyUsage(userId, dateKey, lsvpAmount)
+        await releaseBothUsage(userId, dateKey, lsvpAmount)
         return res.status(400).json({ message: 'Insufficient Lava Coin balance' })
       }
 
@@ -732,7 +753,9 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
         autoApproved: false,
       })
 
-      const pendingMessage = wouldExceedDailyLimit
+      const pendingMessage = wouldExceedGlobalLimit && !wouldExceedDailyLimit && lsvpAmount < config.approvalThresholdLsvp
+        ? 'Daily LSVP distribution is at its limit, so this purchase needs admin approval — your request is now pending'
+        : wouldExceedDailyLimit
         ? `This purchase would take you past today's ${config.dailyLimitLsvp} LSVP daily limit, so it needs admin approval — your request is now pending`
         : `Purchasing ${lsvpAmount} LSVP Tokens or more needs admin approval — your request is now pending`
 
@@ -744,6 +767,7 @@ export function createBlockchainUserRouter(jwtSecret, sessions) {
     } catch (error) {
       if (reservedDateKey) {
         await releaseLsvpDailyUsage(userId, reservedDateKey, lsvpAmount).catch(() => {})
+        if (reservedGlobal) await releaseGlobalLsvpUsage(reservedDateKey, lsvpAmount).catch(() => {})
       }
       console.error(`LSVP purchase error for user ${userId}:`, error)
       res.status(500).json({ message: error.message })

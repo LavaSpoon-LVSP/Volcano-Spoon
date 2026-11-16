@@ -3,7 +3,8 @@ import { Season } from '../models/Season.js'
 import { SeasonScore } from '../models/SeasonScore.js'
 import { User } from '../models/User.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
-import { syncSeasonStatuses, assertNoOverlap, archiveSeason } from '../game/seasonManager.js'
+import { auditAdmin, loadById } from '../admin/adminAuditLog.js'
+import { syncSeasonStatuses, assertNoOverlap, archiveSeason, invalidateActiveSeasonCache } from '../game/seasonManager.js'
 
 function serializeSeason(season) {
   return {
@@ -56,6 +57,13 @@ async function buildLeaderboardEntries(season, limit = 10) {
  */
 export function createSeasonsRouter(jwtSecret) {
   const router = express.Router()
+
+  // Any write (create/edit/end/delete a season) drops the cached active season so the next run
+  // sees the change immediately — see seasonManager.getActiveSeason()'s cache.
+  router.use((req, res, next) => {
+    if (req.method !== 'GET') res.on('finish', invalidateActiveSeasonCache)
+    next()
+  })
   const auth = requireAuth(jwtSecret)
 
   /**
@@ -138,7 +146,7 @@ export function createSeasonsRouter(jwtSecret) {
    * Rejected if it would overlap any season that hasn't ended yet — only
    * one season may be upcoming/active for a given window at a time.
    */
-  router.post('/admin', auth, requireAdmin, async (req, res) => {
+  router.post('/admin', auth, requireAdmin, auditAdmin('season_create'), async (req, res) => {
     try {
       const { name, startDate, endDate } = req.body ?? {}
       const start = new Date(startDate)
@@ -179,7 +187,7 @@ export function createSeasonsRouter(jwtSecret) {
    * its dates are locked, so live/archived standings can never be
    * retroactively reinterpreted under a different window.
    */
-  router.put('/admin/:id', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/:id', auth, requireAdmin, auditAdmin('season_update', { before: loadById(Season) }), async (req, res) => {
     try {
       await syncSeasonStatuses()
       const season = await Season.findById(req.params.id)
@@ -223,7 +231,7 @@ export function createSeasonsRouter(jwtSecret) {
    * configured endDate), freezing/archiving it right now. Lets an admin
    * start the next season without waiting out a stale window.
    */
-  router.post('/admin/:id/end', auth, requireAdmin, async (req, res) => {
+  router.post('/admin/:id/end', auth, requireAdmin, auditAdmin('season_end', { before: loadById(Season), durable: true }), async (req, res) => {
     try {
       const season = await Season.findById(req.params.id)
       if (!season) {
@@ -252,7 +260,7 @@ export function createSeasonsRouter(jwtSecret) {
    * Admin only — remove a season that hasn't started yet. Active/ended
    * seasons can never be deleted (archived data must stay intact).
    */
-  router.delete('/admin/:id', auth, requireAdmin, async (req, res) => {
+  router.delete('/admin/:id', auth, requireAdmin, auditAdmin('season_delete', { before: loadById(Season) }), async (req, res) => {
     try {
       await syncSeasonStatuses()
       const season = await Season.findById(req.params.id)

@@ -86,4 +86,12 @@ const runResultSchema = new mongoose.Schema(
   }
 )
 
+// Query-shape indexes for the run-settlement path (ClientSession._handleRunReport / badges.js):
+//  - per-arena best score lookup (getArenaBest)
+//  - duplicate-input-pattern check
+//  - badge history aggregation / lookups by player + status
+// Mongoose creates these automatically on startup (autoIndex); existing data is unaffected.
+runResultSchema.index({ userId: 1, status: 1, arenaStage: 1, score: -1 })
+runResultSchema.index({ userId: 1, status: 1, inputPatternHash: 1 })
+
 export const RunResult = mongoose.model('RunResult', runResultSchema)

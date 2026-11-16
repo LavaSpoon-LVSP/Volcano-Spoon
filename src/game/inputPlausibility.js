@@ -39,7 +39,23 @@ export function analyzeInputPlausibility({ inputs: allInputs, frames }) {
       return { rejectReason: 'implausible_steer_values', flags, detail }
     }
   }
-  const inputs = Array.isArray(allInputs) ? allInputs.filter((i) => i?.type !== 'steer') : allInputs
+  // Collapse EXACT duplicates (same frame, same vector) into one before timing analysis. A
+  // single physical gesture can be reported twice by the client (e.g. hybrid touch+mouse
+  // devices firing both a touch and a synthesized mouse event), which would otherwise read as
+  // two launches 0 ms apart and reject an honest run. Two DIFFERENT launches inside the human
+  // limit are still rejected, so this does not weaken the bot check.
+  const launchInputs = Array.isArray(allInputs) ? allInputs.filter((i) => i?.type !== 'steer') : allInputs
+  const inputs = Array.isArray(launchInputs)
+    ? launchInputs.filter((inp, idx, arr) => {
+        if (idx === 0) return true
+        const prev = arr[idx - 1]
+        return !(
+          Number(prev?.atFrame) === Number(inp?.atFrame) &&
+          Math.round(Number(prev?.dx) || 0) === Math.round(Number(inp?.dx) || 0) &&
+          Math.round(Number(prev?.dy) || 0) === Math.round(Number(inp?.dy) || 0)
+        )
+      })
+    : launchInputs
 
   if (!Array.isArray(inputs) || inputs.length === 0 || !Array.isArray(frames)) {
     return { rejectReason: null, flags, detail }

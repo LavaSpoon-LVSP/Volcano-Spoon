@@ -53,6 +53,20 @@ const lsvpBuyConfigSchema = new mongoose.Schema(
       min: 1,
       default: 100,
     },
+
+    // ── Treasury protection (see routes/blockchainUser.js POST /lsvp/buy) ──
+    // Hard cap on LSVP in a single purchase; larger requests are rejected outright.
+    maxLsvpPerTransaction: { type: Number, default: 1000, min: 1 },
+    // Total LSVP across ALL players per calendar day; once reached, further
+    // purchases route to admin approval instead of auto-sending.
+    globalDailyLimitLsvp: { type: Number, default: 10000, min: 1 },
+
+    // ── Ratio-change safety guard (see routes/blockchainAdmin.js PUT) ──
+    // A single change larger than this % of the current rate (or outside
+    // min/max) is refused unless the admin explicitly confirms an override.
+    maxRateChangePercent: { type: Number, default: 50, min: 1 },
+    minCoinsPerLsvp: { type: Number, default: 1, min: 1 },
+    maxCoinsPerLsvp: { type: Number, default: 100000, min: 1 },
   },
   {
     timestamps: true,
@@ -71,11 +85,22 @@ export async function getLsvpBuyConfig() {
 }
 
 /** Update the singleton config. Only the provided fields are changed. */
-export async function updateLsvpBuyConfig({ coinsPerLsvp, approvalThresholdLsvp, dailyLimitLsvp } = {}) {
+export const LSVP_BUY_CONFIG_FIELDS = [
+  'coinsPerLsvp',
+  'approvalThresholdLsvp',
+  'dailyLimitLsvp',
+  'maxLsvpPerTransaction',
+  'globalDailyLimitLsvp',
+  'maxRateChangePercent',
+  'minCoinsPerLsvp',
+  'maxCoinsPerLsvp',
+]
+
+export async function updateLsvpBuyConfig(patch = {}) {
   const update = {}
-  if (coinsPerLsvp !== undefined) update.coinsPerLsvp = coinsPerLsvp
-  if (approvalThresholdLsvp !== undefined) update.approvalThresholdLsvp = approvalThresholdLsvp
-  if (dailyLimitLsvp !== undefined) update.dailyLimitLsvp = dailyLimitLsvp
+  for (const f of LSVP_BUY_CONFIG_FIELDS) {
+    if (patch[f] !== undefined) update[f] = patch[f]
+  }
 
   return LsvpBuyConfig.findOneAndUpdate(
     { key: 'default' },

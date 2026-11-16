@@ -3,6 +3,7 @@ import { Nft, PERK_KEYS } from '../models/Nft.js'
 import { User } from '../models/User.js'
 import { NftOwnership } from '../models/NftOwnership.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadById } from '../admin/adminAuditLog.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { verifyLsvpPayment } from '../solana/paymentVerification.js'
@@ -79,7 +80,7 @@ export function createNftRouter(jwtSecret, _sessions) {
    * `perkKey` is required — every entry in this catalog grants a gameplay
    * perk now (see models/Nft.js's header comment).
    */
-  router.post('/', auth, requireAdmin, async (req, res) => {
+  router.post('/', auth, requireAdmin, auditAdmin('nft_create'), async (req, res) => {
     try {
       const { name, description, price, rarity, image, perkKey, enabled } = req.body ?? {}
 
@@ -172,8 +173,8 @@ export function createNftRouter(jwtSecret, _sessions) {
     }
   }
 
-  router.put('/admin/:id', auth, requireAdmin, handleUpdateNft)
-  router.put('/:id', auth, requireAdmin, handleUpdateNft)
+  router.put('/admin/:id', auth, requireAdmin, auditAdmin('nft_update', { before: loadById(Nft) }), handleUpdateNft)
+  router.put('/:id', auth, requireAdmin, auditAdmin('nft_update', { before: loadById(Nft) }), handleUpdateNft)
 
   /**
    * PATCH /api/nfts/:id/enabled (or /admin/:id/enabled)
@@ -193,8 +194,8 @@ export function createNftRouter(jwtSecret, _sessions) {
     }
   }
 
-  router.patch('/admin/:id/enabled', auth, requireAdmin, handleToggleNftEnabled)
-  router.patch('/:id/enabled', auth, requireAdmin, handleToggleNftEnabled)
+  router.patch('/admin/:id/enabled', auth, requireAdmin, auditAdmin('nft_toggle_enabled', { before: loadById(Nft) }), handleToggleNftEnabled)
+  router.patch('/:id/enabled', auth, requireAdmin, auditAdmin('nft_toggle_enabled', { before: loadById(Nft) }), handleToggleNftEnabled)
 
   /**
    * DELETE /api/nfts/:id (or /admin/:id)
@@ -218,8 +219,8 @@ export function createNftRouter(jwtSecret, _sessions) {
     }
   }
 
-  router.delete('/admin/:id', auth, requireAdmin, handleDeleteNft)
-  router.delete('/:id', auth, requireAdmin, handleDeleteNft)
+  router.delete('/admin/:id', auth, requireAdmin, auditAdmin('nft_delete', { before: loadById(Nft) }), handleDeleteNft)
+  router.delete('/:id', auth, requireAdmin, auditAdmin('nft_delete', { before: loadById(Nft) }), handleDeleteNft)
 
   /**
    * GET /api/nfts/me/owned

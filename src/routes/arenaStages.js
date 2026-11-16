@@ -10,6 +10,7 @@ import { ARENA_STAGE_COUNT, ARENA_STAGE_CONFIGS, isValidArenaStage } from '../ga
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { verifyLsvpPayment } from '../solana/paymentVerification.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadConfig } from '../admin/adminAuditLog.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 
 /**
@@ -325,7 +326,7 @@ export function createArenaStagesRouter(jwtSecret, sessions) {
    * provided; omitted fields are left unchanged.
    * Body: { stage: number, unlockCost?: number, rewardMultiplier?: number, rareOrbChance?: number }
    */
-  router.put('/admin/config', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/config', auth, requireAdmin, auditAdmin('config_arena_update', { before: loadConfig(getArenaEconomyConfig) }), async (req, res) => {
     try {
       const stage = Number(req.body?.stage)
       const { unlockCost, rewardMultiplier, rareOrbChance } = req.body ?? {}

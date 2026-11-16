@@ -6,6 +6,7 @@ const userSchema = new mongoose.Schema(
     type: String,
     required: true,
     unique: true,
+    trim: true,
   },
 
   email: {
@@ -41,6 +42,12 @@ const userSchema = new mongoose.Schema(
   coins: {
     type: Number,
     default: 0,
+  },
+
+  // Optional daily coin bonus (see routes/dailyBonus.js) — UTC time of last claim.
+  lastDailyBonusAt: {
+    type: Date,
+    default: null,
   },
 
   // LSVP Token balance — credited by the Lava Coin -> LSVP Token cash-out

@@ -1,4 +1,5 @@
 import express from 'express'
+import mongoose from 'mongoose'
 import { User } from '../models/User.js'
 import { RunResult } from '../models/RunResult.js'
 import { requireAuth } from '../middleware/requireAuth.js'
@@ -54,6 +55,39 @@ export const BADGE_REQUIREMENTS = {
   combo_50: () => ({ maxCombo: { $gte: 50 } }),
 }
 
+/** Best-ever values across this player's committed rounds, in one aggregation. */
+async function getCommittedRoundStats(userId) {
+  const [row] = await RunResult.aggregate([
+    { $match: { userId: new mongoose.Types.ObjectId(String(userId)), status: 'committed' } },
+    {
+      $group: {
+        _id: null,
+        maxSurvivalMs: { $max: '$survivalMs' },
+        maxCombo: { $max: '$maxCombo' },
+        anyJackpot: { $max: { $cond: ['$jackpotOrbCollected', 1, 0] } },
+        anyMythic: { $max: { $cond: ['$mythicOrbCollected', 1, 0] } },
+      },
+    },
+  ])
+  return row || { maxSurvivalMs: 0, maxCombo: 0, anyJackpot: 0, anyMythic: 0 }
+}
+
+// Mirrors BADGE_REQUIREMENTS above, evaluated against the aggregated stats.
+function statsMeetBadge(badgeId, s) {
+  switch (badgeId) {
+    case 'first_jackpot': return s.anyJackpot > 0
+    case 'first_mythic': return s.anyMythic > 0
+    case 'survivor_30': return (s.maxSurvivalMs || 0) >= 30 * 1000
+    case 'survivor_60': return (s.maxSurvivalMs || 0) >= 60 * 1000
+    case 'survivor_120': return (s.maxSurvivalMs || 0) >= 120 * 1000
+    case 'survivor_180': return (s.maxSurvivalMs || 0) >= 180 * 1000
+    case 'combo_10': return (s.maxCombo || 0) >= 10
+    case 'combo_25': return (s.maxCombo || 0) >= 25
+    case 'combo_50': return (s.maxCombo || 0) >= 50
+    default: return false
+  }
+}
+
 /**
  * Server-authoritative badge evaluation and award helper.
  * Evaluates a user's confirmed rounds (or the round just settled) against
@@ -70,6 +104,7 @@ export async function evaluateAndAwardBadgesForUser(userId, currentRound = null)
 
   const existingBadgeIds = new Set((user.badges || []).map(b => b.id))
   const newBadgeIds = []
+  let historyStats = null
 
   for (const [badgeId, getReq] of Object.entries(BADGE_REQUIREMENTS)) {
     if (existingBadgeIds.has(badgeId)) continue
@@ -88,13 +123,9 @@ export async function evaluateAndAwardBadgesForUser(userId, currentRound = null)
     }
 
     if (!qualifies) {
-      const requirement = getReq()
-      const hasRound = await RunResult.exists({
-        userId,
-        status: 'committed',
-        ...requirement,
-      })
-      if (hasRound) qualifies = true
+      // ONE aggregation for all remaining badges (was up to 9 sequential exists() queries).
+      if (!historyStats) historyStats = await getCommittedRoundStats(userId)
+      qualifies = statsMeetBadge(badgeId, historyStats)
     }
 
     if (qualifies) {

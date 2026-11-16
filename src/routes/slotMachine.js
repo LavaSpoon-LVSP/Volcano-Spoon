@@ -14,6 +14,7 @@ import { getTransferFinalStatus } from '../solana/tokenService.js'
 import { drawSlotNftReward } from '../game/slotNftReward.js'
 import { explorerTxUrl } from '../config/solana.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadConfig } from '../admin/adminAuditLog.js'
 import { requirePayoutsNotPaused } from '../models/PayoutConfig.js'
 
 /**
@@ -454,7 +455,7 @@ export function createSlotMachineRouter(jwtSecret, sessions) {
    * Slot-Machine-eligible, and how many, is configured per-collection from
    * the Blockchain admin tab (NftCollection.slotEligible/slotRewardQuantity).
    */
-  router.put('/admin/config', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/config', auth, requireAdmin, auditAdmin('config_slot_machine_update', { before: loadConfig(getSlotMachineConfig) }), async (req, res) => {
     try {
       const { costPerSpin, coins, nft } = req.body ?? {}
 

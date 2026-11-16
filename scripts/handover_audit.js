@@ -96,7 +96,7 @@ if (has('seasons')) (await col('seasons').find({}, { projection: { name: 1, stat
   .forEach((s) => console.log(`   season "${s.name}" ${s.status} ${s.startDate?.toISOString?.().slice(0, 10)} -> ${s.endDate?.toISOString?.().slice(0, 10)}`))
 
 section('5. Settings left over from testing (printed for review against the agreed values)')
-for (const coll of ['arenastageconfigs', 'energyconfigs', 'lsvpbuyconfigs', 'payoutconfigs', 'cashoutconfigs', 'jackpotconfigs', 'slotmachineconfigs']) {
+for (const coll of ['arenastageconfigs', 'energyconfigs', 'lsvpbuyconfigs', 'rewardcapsconfigs', 'payoutconfigs', 'cashoutconfigs', 'jackpotconfigs', 'slotmachineconfigs']) {
   if (!has(coll)) { console.log(`(no "${coll}" document yet: code defaults apply)`); continue }
   const docs = await col(coll).find({}, { projection: { _id: 0, __v: 0, createdAt: 0, updatedAt: 0 } }).toArray()
   docs.forEach((d) => console.log(`${coll}: ${JSON.stringify(d)}`))

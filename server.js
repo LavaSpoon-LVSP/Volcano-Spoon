@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws'
 import { connectMongo } from './mongo.js'
 import { User } from './src/models/User.js'
 import { AdminUser } from './src/models/AdminUser.js'
+import { recordAdminAction } from './src/admin/adminAuditLog.js'
 import { Score } from './src/models/Score.js'
 import { PasswordResetToken } from './src/models/PasswordResetToken.js'
 import { sendMail } from './src/mail/mailer.js'
@@ -28,6 +29,7 @@ import { createBadgesRouter } from './src/routes/badges.js'
 import { createItemsRouter } from './src/routes/items.js'
 import { createSlotMachineRouter } from './src/routes/slotMachine.js'
 import { createEnergyRouter } from './src/routes/energy.js'
+import { createDailyBonusRouter } from './src/routes/dailyBonus.js'
 import { createBlockchainAdminRouter } from './src/routes/blockchainAdmin.js'
 import { createBlockchainUserRouter } from './src/routes/blockchainUser.js'
 import { createAdminAccountsRouter } from './src/routes/adminAccounts.js'
@@ -61,6 +63,8 @@ const DEFAULT_CORS_ORIGINS = [
   'https://volcanospoonv12.infinity-staging.site',
   'https://volcanospoonv13.infinity-staging.site',
   'https://volcanospoonv18.infinity-staging.site',
+  'https://game.lavaspoon.com',
+  'https://adminvolcano.infinity-staging.site',
 ]
 const CORS_ORIGINS = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
@@ -111,9 +115,12 @@ app.get('/health', (_req, res) => {
 
 app.post('/auth/signup', async (req, res) => {
   try {
-    const { username, email, password } = req.body ?? {}
+    const { email, password } = req.body ?? {}
+    // Store the trimmed username — a trailing/leading space would otherwise
+    // be saved verbatim and break username lookups elsewhere (e.g. admin).
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : req.body?.username
 
-    if (!username?.trim()) {
+    if (!username) {
       return res.status(400).json({
         message: 'Username is required',
       })
@@ -444,6 +451,7 @@ app.post('/admin/login', adminLoginLimiter, async (req, res) => {
       const created = await AdminUser.create({ username: bootstrapUsername, passwordHash: bootstrapHash, role: 'owner' })
       created.lastLoginAt = new Date()
       await created.save()
+      recordAdminAction({ adminId: created._id, adminUsername: created.username, action: 'admin_login', targetUsername: created.username, reason: 'Bootstrap owner account created and signed in', ip: req.ip })
       return res.json({ token: signAdminToken(JWT_SECRET, created) })
     }
 
@@ -460,11 +468,20 @@ app.post('/admin/login', adminLoginLimiter, async (req, res) => {
 
     const matches = await bcrypt.compare(password, admin.passwordHash)
     if (!matches) {
+      recordAdminAction({
+        adminId: admin._id, adminUsername: admin.username, action: 'admin_login_failed',
+        targetUsername: admin.username, reason: 'Wrong password for an existing admin account', ip: req.ip,
+      })
       return res.status(401).json({ message: 'Incorrect username or password' })
     }
 
     admin.lastLoginAt = new Date()
     await admin.save()
+
+    recordAdminAction({
+      adminId: admin._id, adminUsername: admin.username, action: 'admin_login',
+      targetUsername: admin.username, reason: 'Admin signed in', ip: req.ip,
+    })
 
     res.json({ token: signAdminToken(JWT_SECRET, admin) })
   } catch (error) {
@@ -588,6 +605,7 @@ app.use('/api/slot-machine', createSlotMachineRouter(JWT_SECRET, sessions))
    (see EnergyService.consumeEnergyForRun), not through this router.
 */
 app.use('/api/energy', createEnergyRouter(JWT_SECRET, sessions))
+app.use('/api/bonus', createDailyBonusRouter(JWT_SECRET, sessions))
 
 /* ── Solana Blockchain routes (additive — see src/config/solana.js,
    src/solana/*, src/models/NftCollection.js, NftMint.js,

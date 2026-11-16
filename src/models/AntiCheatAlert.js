@@ -62,6 +62,12 @@ const antiCheatAlertSchema = new mongoose.Schema(
         'implausible_input_rate',
         'scripted_input_timing',
         'duplicate_input_pattern',
+        // Emitted by ClientSession but previously missing from this enum, so Mongoose
+        // validation rejected them and they were never persisted (alerts.create().catch only logs).
+        'implausible_steer_values',
+        'diamond_payout',
+        'max_coins_per_run_clamped',
+        'settlement_error',
       ],
       required: true,
       index: true,

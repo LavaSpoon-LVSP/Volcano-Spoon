@@ -5,6 +5,7 @@ import { Item } from '../models/Item.js'
 import { ItemInventory } from '../models/ItemInventory.js'
 import { User } from '../models/User.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadById } from '../admin/adminAuditLog.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { verifyLsvpPayment } from '../solana/paymentVerification.js'
@@ -323,7 +324,7 @@ export function createItemsRouter(jwtSecret) {
    * Admin only — create a new in-game item.
    * Body: { name, description?, icon, rarity?, price?, properties? }
    */
-  router.post('/admin', auth, requireAdmin, async (req, res) => {
+  router.post('/admin', auth, requireAdmin, auditAdmin('item_create'), async (req, res) => {
     try {
       const { name, description, icon, rarity, price, properties } = req.body ?? {}
 
@@ -365,7 +366,7 @@ export function createItemsRouter(jwtSecret) {
    * Admin only — edit any subset of an item's fields.
    * Body: { name?, description?, icon?, rarity?, price?, properties?, enabled? }
    */
-  router.put('/admin/:id', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/:id', auth, requireAdmin, auditAdmin('item_update', { before: loadById(Item) }), async (req, res) => {
     try {
       const { name, description, icon, rarity, price, properties, enabled } = req.body ?? {}
       const $set = {}
@@ -416,7 +417,7 @@ export function createItemsRouter(jwtSecret) {
    * public catalog for new acquisitions).
    * Body: { enabled: boolean }
    */
-  router.patch('/admin/:id/enabled', auth, requireAdmin, async (req, res) => {
+  router.patch('/admin/:id/enabled', auth, requireAdmin, auditAdmin('item_toggle_enabled', { before: loadById(Item) }), async (req, res) => {
     try {
       const enabled = Boolean(req.body?.enabled)
       const item = await Item.findByIdAndUpdate(req.params.id, { $set: { enabled } }, { new: true })
@@ -436,7 +437,7 @@ export function createItemsRouter(jwtSecret) {
    * skips rows whose item no longer exists) rather than silently deleting
    * a record of what a player used to own.
    */
-  router.delete('/admin/:id', auth, requireAdmin, async (req, res) => {
+  router.delete('/admin/:id', auth, requireAdmin, auditAdmin('item_delete', { before: loadById(Item) }), async (req, res) => {
     try {
       // Block deletion once any player owns at least one — an admin
       // handover-doc requirement ("Admin panel safety"): deleting a
@@ -466,7 +467,7 @@ export function createItemsRouter(jwtSecret) {
    * future acquisition path (purchase/reward/quest/gameplay) would use.
    * Body: { username: string, itemId: string, quantity?: number (default 1) }
    */
-  router.post('/admin/grant', auth, requireAdmin, async (req, res) => {
+  router.post('/admin/grant', auth, requireAdmin, auditAdmin('item_grant', { durable: true }), async (req, res) => {
     try {
       const { username, itemId } = req.body ?? {}
       const quantity = Number(req.body?.quantity ?? 1)

@@ -76,10 +76,32 @@ export async function archiveSeason(seasonId, now = new Date()) {
   return season
 }
 
+// Short-lived cache for the active season. getActiveSeason() is called several times per finished
+// run (best score, season score, leaderboard) and each call used to cost 3 Mongo queries
+// (updateMany + find + findOne). A season only changes at a start/end boundary or on an admin edit,
+// so a few seconds of caching is safe: the cached season is dropped the moment its endDate passes,
+// and admin mutations call invalidateActiveSeasonCache().
+const ACTIVE_SEASON_TTL_MS = 15000
+let _activeSeasonCache = null // { season, at }
+
+export function invalidateActiveSeasonCache() {
+  _activeSeasonCache = null
+}
+
 /** The single season currently accepting scores, or null if none. */
 export async function getActiveSeason() {
+  const nowMs = Date.now()
+  if (
+    _activeSeasonCache &&
+    nowMs - _activeSeasonCache.at < ACTIVE_SEASON_TTL_MS &&
+    (!_activeSeasonCache.season || new Date(_activeSeasonCache.season.endDate).getTime() > nowMs)
+  ) {
+    return _activeSeasonCache.season
+  }
   await syncSeasonStatuses()
-  return Season.findOne({ status: 'active' })
+  const season = await Season.findOne({ status: 'active' })
+  _activeSeasonCache = { season, at: Date.now() }
+  return season
 }
 
 /**

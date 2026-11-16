@@ -6,6 +6,7 @@ import { settleUserEnergy, purchaseEnergy } from '../game/EnergyService.js'
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { verifyLsvpPayment } from '../solana/paymentVerification.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadConfig } from '../admin/adminAuditLog.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 
 /**
@@ -238,7 +239,7 @@ export function createEnergyRouter(jwtSecret, sessions) {
    * regenIntervalMinutes, dailyResetEnabled, dailyResetTimezone,
    * lsvpCostFive, lsvpCostTen, lsvpCostUnlimitedHour.
    */
-  router.put('/admin/config', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/config', auth, requireAdmin, auditAdmin('config_energy_update', { before: loadConfig(getEnergyConfig) }), async (req, res) => {
     try {
       const body = req.body ?? {}
       const patch = {}

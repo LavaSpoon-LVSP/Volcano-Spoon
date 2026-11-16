@@ -1,10 +1,14 @@
 import express from 'express'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadConfig } from '../admin/adminAuditLog.js'
 import { User } from '../models/User.js'
 import { NftCollection } from '../models/NftCollection.js'
 import { NftMint } from '../models/NftMint.js'
 import { LsvpPurchaseRequest } from '../models/LsvpPurchaseRequest.js'
-import { getLsvpBuyConfig, updateLsvpBuyConfig } from '../models/LsvpBuyConfig.js'
+import { getLsvpBuyConfig, updateLsvpBuyConfig, LSVP_BUY_CONFIG_FIELDS } from '../models/LsvpBuyConfig.js'
+import { LsvpRateChange, logConfigChanges, percentChange } from '../models/LsvpRateChange.js'
+import { getGlobalLsvpUsage, releaseGlobalLsvpUsage } from '../models/LsvpGlobalDailyUsage.js'
+import { getRewardCapsConfig, updateRewardCapsConfig, invalidateRewardCapsCache } from '../models/RewardCapsConfig.js'
 import { SOLANA_NETWORK, adminPublicKey, connection, explorerTxUrl } from '../config/solana.js'
 import { scanAdminWalletNfts, transferNftFromAdmin, isNftHeldByWallet } from '../solana/nftService.js'
 import { decideRetryAction } from '../solana/nftRetryDecision.js'
@@ -103,7 +107,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * available supply" step — run it whenever new NFTs have been sent to
    * the admin wallet.
    */
-  router.post('/nft-collections/sync', auth, requireAdmin, async (_req, res) => {
+  router.post('/nft-collections/sync', auth, requireAdmin, auditAdmin('nft_collection_sync'), async (_req, res) => {
     try {
       const scanned = await scanAdminWalletNfts()
 
@@ -173,7 +177,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * optional and only updates the price when provided.
    * Body: { count: number, priceLsvp?: number }
    */
-  router.post('/nft-collections/:collectionMintAddress/publish', auth, requireAdmin, async (req, res) => {
+  router.post('/nft-collections/:collectionMintAddress/publish', auth, requireAdmin, auditAdmin('nft_collection_publish'), async (req, res) => {
     const { collectionMintAddress } = req.params
     const count = Number(req.body?.count)
     const priceLsvp = req.body?.priceLsvp !== undefined ? Number(req.body.priceLsvp) : undefined
@@ -226,7 +230,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * NFTs.
    * Body: { count: number }
    */
-  router.post('/nft-collections/:collectionMintAddress/unpublish', auth, requireAdmin, async (req, res) => {
+  router.post('/nft-collections/:collectionMintAddress/unpublish', auth, requireAdmin, auditAdmin('nft_collection_unpublish'), async (req, res) => {
     const { collectionMintAddress } = req.params
     const count = Number(req.body?.count)
 
@@ -263,7 +267,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * budget the quantity here against whatever isn't also being published.
    * Body: { enabled: boolean, quantity: number }
    */
-  router.put('/nft-collections/:collectionMintAddress/jackpot-reward', auth, requireAdmin, async (req, res) => {
+  router.put('/nft-collections/:collectionMintAddress/jackpot-reward', auth, requireAdmin, auditAdmin('nft_collection_jackpot_reward_update'), async (req, res) => {
     const { collectionMintAddress } = req.params
     const enabled = Boolean(req.body?.enabled)
     const quantity = Number(req.body?.quantity)
@@ -301,7 +305,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * pool, so an admin should budget quantities across all three together.
    * Body: { enabled: boolean, quantity: number }
    */
-  router.put('/nft-collections/:collectionMintAddress/slot-reward', auth, requireAdmin, async (req, res) => {
+  router.put('/nft-collections/:collectionMintAddress/slot-reward', auth, requireAdmin, auditAdmin('nft_collection_slot_reward_update'), async (req, res) => {
     const { collectionMintAddress } = req.params
     const enabled = Boolean(req.body?.enabled)
     const quantity = Number(req.body?.quantity)
@@ -357,7 +361,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * already paid for this (see routes/blockchainUser.js's purchase route)
    * — this only re-attempts the on-chain send, it never re-charges anyone.
    */
-  router.post('/nft-mints/:mintAddress/retry-transfer', auth, requireAdmin, async (req, res) => {
+  router.post('/nft-mints/:mintAddress/retry-transfer', auth, requireAdmin, auditAdmin('nft_mint_retry_transfer', { durable: true }), async (req, res) => {
     try {
       // Atomically claim this mint for a retry attempt — moves
       // transferFailed:true -> 'processing' in one findOneAndUpdate so two
@@ -461,7 +465,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * explorer): clears the failed flag without sending anything and records
    * who/why. Never sends a transfer.
    */
-  router.post('/nft-mints/:mintAddress/resolve', auth, requireAdmin, async (req, res) => {
+  router.post('/nft-mints/:mintAddress/resolve', auth, requireAdmin, auditAdmin('nft_mint_resolve', { durable: true }), async (req, res) => {
     const reason = String(req.body?.reason || '').trim()
     if (reason.length < 3) {
       return res.status(400).json({ message: 'A reason is required (for example: "verified in buyer wallet on Solscan")' })
@@ -481,48 +485,211 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
     }
   })
 
+  const adminName = (req) => String(req.user?.username || req.user?.sub || 'admin')
+
+  const serializeBuyConfig = (config) => {
+    const out = {}
+    for (const f of LSVP_BUY_CONFIG_FIELDS) out[f] = config[f]
+    return out
+  }
+
   /**
    * GET /api/admin/blockchain/lsvp-buy-config
    * PUT /api/admin/blockchain/lsvp-buy-config
-   * The coins-per-LSVP rate, the LSVP amount in a single purchase that
-   * requires admin approval, and the per-player daily LSVP total that
-   * also routes to admin approval once reached (see LsvpBuyConfig.js).
+   * The coins-per-LSVP rate plus every treasury limit (see LsvpBuyConfig.js).
+   * Every change is written to the LsvpRateChange audit log. A rate change
+   * larger than maxRateChangePercent, or outside min/maxCoinsPerLsvp, is
+   * refused with 409 { code: 'RATE_GUARD' } unless the body carries
+   * confirmOverride: true (the admin UI asks the admin to confirm first).
+   * Body may also include `note` (free text stored with the audit rows).
    */
   router.get('/lsvp-buy-config', auth, requireAdmin, async (_req, res) => {
     try {
+      res.json(serializeBuyConfig(await getLsvpBuyConfig()))
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  router.put('/lsvp-buy-config', auth, requireAdmin, auditAdmin('config_lsvp_buy_update', { before: loadConfig(getLsvpBuyConfig) }), async (req, res) => {
+    try {
+      const body = req.body ?? {}
+      const patch = {}
+      for (const f of LSVP_BUY_CONFIG_FIELDS) {
+        if (body[f] === undefined) continue
+        const n = Number(body[f])
+        if (!Number.isFinite(n) || n <= 0) {
+          return res.status(400).json({ message: `${f} must be a positive number` })
+        }
+        patch[f] = n
+      }
+      if (Object.keys(patch).length === 0) {
+        return res.status(400).json({ message: 'No settings provided' })
+      }
+
+      const before = await getLsvpBuyConfig()
+      const beforeSnapshot = serializeBuyConfig(before)
+      const merged = { ...beforeSnapshot, ...patch }
+
+      if (merged.minCoinsPerLsvp > merged.maxCoinsPerLsvp) {
+        return res.status(400).json({ message: 'minCoinsPerLsvp cannot be greater than maxCoinsPerLsvp' })
+      }
+
+      // Safety guard on the rate itself.
+      const confirmOverride = body.confirmOverride === true
+      if (patch.coinsPerLsvp !== undefined && patch.coinsPerLsvp !== before.coinsPerLsvp) {
+        const pct = percentChange(before.coinsPerLsvp, patch.coinsPerLsvp)
+        const problems = []
+        if (patch.coinsPerLsvp < merged.minCoinsPerLsvp) problems.push(`below the minimum of ${merged.minCoinsPerLsvp} coins per LSVP`)
+        if (patch.coinsPerLsvp > merged.maxCoinsPerLsvp) problems.push(`above the maximum of ${merged.maxCoinsPerLsvp} coins per LSVP`)
+        if (pct !== null && Math.abs(pct) > merged.maxRateChangePercent) {
+          problems.push(`a ${pct > 0 ? '+' : ''}${pct}% change, more than the allowed ${merged.maxRateChangePercent}% in one step`)
+        }
+        if (problems.length && !confirmOverride) {
+          return res.status(409).json({
+            code: 'RATE_GUARD',
+            requiresOverride: true,
+            message: `Rate change ${before.coinsPerLsvp} -> ${patch.coinsPerLsvp} is ${problems.join(' and ')}. Confirm to apply it anyway.`,
+            current: before.coinsPerLsvp,
+            requested: patch.coinsPerLsvp,
+            changePercent: pct,
+          })
+        }
+      }
+
+      const config = await updateLsvpBuyConfig(patch)
+      const afterSnapshot = serializeBuyConfig(config)
+      await logConfigChanges({
+        scope: 'lsvpBuy',
+        before: beforeSnapshot,
+        after: afterSnapshot,
+        fields: LSVP_BUY_CONFIG_FIELDS,
+        changedBy: adminName(req),
+        note: typeof body.note === 'string' ? body.note.trim().slice(0, 300) : null,
+        overrideUsed: confirmOverride,
+      })
+      res.json(afterSnapshot)
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /**
+   * GET /api/admin/blockchain/lsvp-rate-history?limit=100
+   * Audit log of every settings change (newest first).
+   */
+  router.get('/lsvp-rate-history', auth, requireAdmin, async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500)
+      const changes = await LsvpRateChange.find({}).sort({ createdAt: -1 }).limit(limit)
+      res.json({ changes })
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  /**
+   * GET /api/admin/blockchain/lsvp-stats
+   * Monitoring numbers for the admin dashboard.
+   */
+  router.get('/lsvp-stats', auth, requireAdmin, async (_req, res) => {
+    try {
       const config = await getLsvpBuyConfig()
+      const dateKey = todayDateKey()
+      const [byStatus, deliveredToday, adminLsvpBalance] = await Promise.all([
+        LsvpPurchaseRequest.aggregate([
+          { $group: { _id: '$status', count: { $sum: 1 }, lsvp: { $sum: '$lsvpAmount' }, coins: { $sum: '$coinsSpent' } } },
+        ]),
+        getGlobalLsvpUsage(dateKey),
+        getAdminLsvpBalance().catch(() => null),
+      ])
+      const pick = (status) => byStatus.find((r) => r._id === status) || { count: 0, lsvp: 0, coins: 0 }
+      const approved = pick('approved')
+      const pending = pick('pending')
+      const processing = pick('processing')
+      const rejected = pick('rejected')
+      const pendingLsvp = pending.lsvp + processing.lsvp
+      // Reservations for today count both sent and still-pending requests.
+      const exposureLsvp = approved.lsvp + pendingLsvp
+      const walletBalance = Number.isFinite(Number(adminLsvpBalance)) ? Number(adminLsvpBalance) : null
       res.json({
         coinsPerLsvp: config.coinsPerLsvp,
-        approvalThresholdLsvp: config.approvalThresholdLsvp,
-        dailyLimitLsvp: config.dailyLimitLsvp,
+        totalCoinsSpent: approved.coins,
+        totalLsvpConverted: approved.lsvp,
+        approvedCount: approved.count,
+        rejectedCount: rejected.count,
+        pendingCount: pending.count + processing.count,
+        pendingLsvp,
+        pendingCoins: pending.coins + processing.coins,
+        reservedTodayLsvp: deliveredToday,
+        globalDailyLimitLsvp: config.globalDailyLimitLsvp,
+        globalDailyUsedPercent: config.globalDailyLimitLsvp > 0 ? Math.round((deliveredToday / config.globalDailyLimitLsvp) * 1000) / 10 : null,
+        // Token exposure = everything already sent plus everything promised but not yet sent.
+        tokenExposureLsvp: exposureLsvp,
+        pendingExposureLsvp: pendingLsvp,
+        adminWalletLsvpBalance: walletBalance,
+        pendingVsWalletPercent: walletBalance && walletBalance > 0 ? Math.round((pendingLsvp / walletBalance) * 1000) / 10 : null,
+        generatedAt: new Date().toISOString(),
       })
     } catch (error) {
       res.status(500).json({ message: error.message })
     }
   })
 
-  router.put('/lsvp-buy-config', auth, requireAdmin, async (req, res) => {
+  /**
+   * GET/PUT /api/admin/blockchain/reward-caps
+   * Diamond Orb payout + per-run coin cap (see RewardCapsConfig.js). Changes
+   * are audit-logged (scope 'rewardCaps') and picked up by the game server
+   * within ~30s (cache is invalidated immediately on this process).
+   */
+  const REWARD_CAP_FIELDS = ['diamondOrbCoinPayout', 'diamondOrbEnabled', 'maxCoinsPerRun']
+  const serializeRewardCaps = (c) => ({
+    diamondOrbCoinPayout: c.diamondOrbCoinPayout,
+    diamondOrbEnabled: c.diamondOrbEnabled,
+    maxCoinsPerRun: c.maxCoinsPerRun,
+  })
+
+  router.get('/reward-caps', auth, requireAdmin, async (_req, res) => {
     try {
-      const { coinsPerLsvp, approvalThresholdLsvp, dailyLimitLsvp } = req.body ?? {}
-      if (coinsPerLsvp !== undefined && (!Number.isFinite(Number(coinsPerLsvp)) || Number(coinsPerLsvp) <= 0)) {
-        return res.status(400).json({ message: 'coinsPerLsvp must be a positive number' })
+      res.json(serializeRewardCaps(await getRewardCapsConfig()))
+    } catch (error) {
+      res.status(500).json({ message: error.message })
+    }
+  })
+
+  router.put('/reward-caps', auth, requireAdmin, auditAdmin('config_reward_caps_update', { before: loadConfig(getRewardCapsConfig) }), async (req, res) => {
+    try {
+      const body = req.body ?? {}
+      const patch = {}
+      if (body.diamondOrbCoinPayout !== undefined) {
+        const n = Number(body.diamondOrbCoinPayout)
+        if (!Number.isFinite(n) || n < 0) return res.status(400).json({ message: 'diamondOrbCoinPayout must be 0 or more' })
+        patch.diamondOrbCoinPayout = Math.floor(n)
       }
-      if (approvalThresholdLsvp !== undefined && (!Number.isFinite(Number(approvalThresholdLsvp)) || Number(approvalThresholdLsvp) <= 0)) {
-        return res.status(400).json({ message: 'approvalThresholdLsvp must be a positive number' })
+      if (body.maxCoinsPerRun !== undefined) {
+        const n = Number(body.maxCoinsPerRun)
+        if (!Number.isFinite(n) || n < 1) return res.status(400).json({ message: 'maxCoinsPerRun must be a positive number' })
+        patch.maxCoinsPerRun = Math.floor(n)
       }
-      if (dailyLimitLsvp !== undefined && (!Number.isFinite(Number(dailyLimitLsvp)) || Number(dailyLimitLsvp) <= 0)) {
-        return res.status(400).json({ message: 'dailyLimitLsvp must be a positive number' })
+      if (body.diamondOrbEnabled !== undefined) {
+        if (typeof body.diamondOrbEnabled !== 'boolean') return res.status(400).json({ message: 'diamondOrbEnabled must be true or false' })
+        patch.diamondOrbEnabled = body.diamondOrbEnabled
       }
-      const config = await updateLsvpBuyConfig({
-        coinsPerLsvp: coinsPerLsvp !== undefined ? Number(coinsPerLsvp) : undefined,
-        approvalThresholdLsvp: approvalThresholdLsvp !== undefined ? Number(approvalThresholdLsvp) : undefined,
-        dailyLimitLsvp: dailyLimitLsvp !== undefined ? Number(dailyLimitLsvp) : undefined,
+      if (Object.keys(patch).length === 0) return res.status(400).json({ message: 'No settings provided' })
+
+      const before = serializeRewardCaps(await getRewardCapsConfig())
+      const config = await updateRewardCapsConfig(patch)
+      const after = serializeRewardCaps(config)
+      invalidateRewardCapsCache()
+      await logConfigChanges({
+        scope: 'rewardCaps',
+        before,
+        after,
+        fields: REWARD_CAP_FIELDS,
+        changedBy: adminName(req),
+        note: typeof body.note === 'string' ? body.note.trim().slice(0, 300) : null,
       })
-      res.json({
-        coinsPerLsvp: config.coinsPerLsvp,
-        approvalThresholdLsvp: config.approvalThresholdLsvp,
-        dailyLimitLsvp: config.dailyLimitLsvp,
-      })
+      res.json(after)
     } catch (error) {
       res.status(500).json({ message: error.message })
     }
@@ -554,7 +721,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * the on-chain transfer then fails, the coins are refunded immediately —
    * the player is never charged for a transfer that didn't happen.
    */
-  router.post('/lsvp-requests/:id/approve', auth, requireAdmin, async (req, res) => {
+  router.post('/lsvp-requests/:id/approve', auth, requireAdmin, auditAdmin('lsvp_request_approve', { durable: true }), async (req, res) => {
     try {
       // Atomically claim this request for processing — moves
       // pending -> processing in one findOneAndUpdate so a concurrent
@@ -691,7 +858,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * balance completely unchanged — same convention as cashout.js.
    * Body: { reason?: string }
    */
-  router.post('/lsvp-requests/:id/reject', auth, requireAdmin, async (req, res) => {
+  router.post('/lsvp-requests/:id/reject', auth, requireAdmin, auditAdmin('lsvp_request_reject', { durable: true }), async (req, res) => {
     try {
       // Atomically claim this request — same pending -> processing gate as
       // approve, above, so approve-versus-reject of the SAME request can
@@ -726,6 +893,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
       // rejected on a later calendar day must still release against the
       // day it was originally reserved for.
       await releaseLsvpDailyUsage(claimed.user, todayDateKey(claimed.createdAt), claimed.lsvpAmount)
+      await releaseGlobalLsvpUsage(todayDateKey(claimed.createdAt), claimed.lsvpAmount)
 
       claimed.status = 'rejected'
       claimed.reviewedBy = req.user.sub
@@ -757,7 +925,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
     }
   })
 
-  router.put('/payout-config', auth, requireAdmin, async (req, res) => {
+  router.put('/payout-config', auth, requireAdmin, auditAdmin('config_payout_update', { before: loadConfig(getPayoutConfig), durable: true }), async (req, res) => {
     try {
       const paused = Boolean(req.body?.paused)
       const config = await setPayoutsPaused(paused, req.body?.reason)
@@ -811,7 +979,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * Admin only — retry applying the grant for an on-chain LSVP payment
    * whose original grant failed or died mid-request (grantedAt: null).
    */
-  router.post('/undelivered-payments/:id/retry', auth, requireAdmin, async (req, res) => {
+  router.post('/undelivered-payments/:id/retry', auth, requireAdmin, auditAdmin('undelivered_payment_retry', { durable: true }), async (req, res) => {
     const { id } = req.params
     try {
       const payment = await LsvpPayment.findById(id)
@@ -880,7 +1048,7 @@ export function createBlockchainAdminRouter(jwtSecret, sessions) {
    * Admin only — mark an undelivered payment as resolved without running the
    * automated grant (e.g. handled manually or refunded off-chain).
    */
-  router.post('/undelivered-payments/:id/resolve', auth, requireAdmin, async (req, res) => {
+  router.post('/undelivered-payments/:id/resolve', auth, requireAdmin, auditAdmin('undelivered_payment_resolve', { durable: true }), async (req, res) => {
     const { id } = req.params
     try {
       const payment = await LsvpPayment.findOneAndUpdate(

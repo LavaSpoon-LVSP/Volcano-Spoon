@@ -55,7 +55,7 @@ const MAX_INPUTS = 20000
  *   artifacts change again before the report arrives.
  * @returns {{score:number, coins:number, jackpotTokensCollected:number, framesReplayed:number, crashed:boolean, error?:string}}
  */
-export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, artifactPerks }) {
+export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, artifactPerks, diamondCoinPayout }) {
   if (!Number.isFinite(seed) || !Array.isArray(frames)) {
     return { score: 0, coins: 0, jackpotTokensCollected: 0, framesReplayed: 0, crashed: true, error: 'invalid_replay_input' }
   }
@@ -81,6 +81,7 @@ export function replayRun({ seed, frames, inputs, arenaStage, stageMultipliers, 
       game.setArenaStage?.(arenaStage, stageMultipliers || {})
     }
     game.setArtifactPerks?.(artifactPerks || {})
+    if (diamondCoinPayout !== undefined && diamondCoinPayout !== null) game.setDiamondCoinPayout?.(diamondCoinPayout)
 
     for (let i = 0; i < frames.length; i += 1) {
       while (inputCursor < sortedInputs.length && Number(sortedInputs[inputCursor]?.atFrame) <= i) {

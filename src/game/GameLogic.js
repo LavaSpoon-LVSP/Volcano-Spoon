@@ -76,6 +76,10 @@ export class GameLogic {
     this.arena      = new ArenaSystem()
     this.levels     = new LevelSystem()
 
+    // Raw Lava Coins paid ONCE per run by a Diamond Orb. Defaults to the constant; the server
+    // overrides it per run from the admin-editable reward caps (see setDiamondCoinPayout and
+    // models/RewardCapsConfig.js). Never affects RNG/spawns, so replay determinism is unchanged.
+    this.diamondCoinPayout = DIAMOND_COIN_PAYOUT
     this._lastBlackOrbDistortUntil = 0   // set when a Black Orb is collected (see case 'black')
     this._diamondBoostUntil = 0
     this._sunBoostUntil = 0
@@ -240,6 +244,12 @@ export class GameLogic {
    *  effect in this engine version). */
   setPlatform(isMobile) {
     this.isMobile = Boolean(isMobile)
+  }
+
+  /** Admin-configured raw coin payout for a Diamond Orb (0 = orb gives its boost but no coins). */
+  setDiamondCoinPayout(amount) {
+    const n = Number(amount)
+    this.diamondCoinPayout = Number.isFinite(n) && n >= 0 ? Math.floor(n) : DIAMOND_COIN_PAYOUT
   }
 
   /**
@@ -746,7 +756,7 @@ export class GameLogic {
         // `this.coins += COIN_PER_LAVA_ORB` on every lava orb pickup.
         this.coins += COIN_PER_LAVA_ORB * lavaValue
         if (res.tieredUp) {
-          this._spawnFloatText(`x${res.multiplier} COMBO!`, px, py - 50, '#ffff77')
+          this._spawnFloatText(`x${res.multiplier} COMBO! +${pts}`, px, py - 50, '#ffff77')
           this.effects.createImpactGlow(px, py, 'wall_bounce', 1.2)
         } else {
           this._spawnFloatText(`+${pts}`, px, py - 35, '#7fffa8')
@@ -786,10 +796,10 @@ export class GameLogic {
         // the same run from paying again. Goes through the normal settlement
         // (rawCoins x run-start multiplier snapshot) - no second credit path.
         if (this.diamondPayoutCount === 0) {
-          this.coins += DIAMOND_COIN_PAYOUT
+          this.coins += this.diamondCoinPayout
           this.diamondPayoutCount = 1
-          this._spawnFloatText(`+${DIAMOND_COIN_PAYOUT.toLocaleString('en-US')}🪙`, px, py - 80, '#ffd700')
-          this._serverEventQueue.push({ type: 'diamond_collected', orbId: orb.id, timestamp: now, coins: DIAMOND_COIN_PAYOUT })
+          this._spawnFloatText(`+${this.diamondCoinPayout.toLocaleString('en-US')}🪙`, px, py - 80, '#ffd700')
+          this._serverEventQueue.push({ type: 'diamond_collected', orbId: orb.id, timestamp: now, coins: this.diamondCoinPayout })
         }
         // 5 s window: combo gain x1.25 and Lava Orbs worth x4. A second Diamond just refreshes the timer.
         this._diamondBoostUntil = now + DIAMOND_BOOST_DURATION_MS

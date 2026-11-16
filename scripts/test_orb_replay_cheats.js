@@ -21,9 +21,10 @@ let st = 5
 const rnd = () => { st |= 0; st = (st + 0x6d2b79f5) | 0; let t = Math.imul(st ^ (st >>> 15), 1 | st); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
 
 // plan: [{ frame, orb }] pickups injected at the player position; steer targets while Gravity control is open
-function sim(Game, seedFn, clockFn, seed, stage, plan, inputsIn, frames) {
+function sim(Game, seedFn, clockFn, seed, stage, plan, inputsIn, frames, diamondPayout) {
   seedFn(seed); let now = 0; clockFn(() => now)
   const g = new Game(); g.reset(); g.setArenaStage(stage, { lavaCoinMultiplier: 1 }); g.setArtifactPerks?.({})
+  if (diamondPayout !== undefined) g.setDiamondCoinPayout(diamondPayout)
   const inputs = [], hist = []
   const N = frames ? frames.length : 900
   const outFrames = []
@@ -70,6 +71,19 @@ for (const c of CASES) {
     `${c.name}: identical over ${cl.res.steps} frames (score ${cl.res.score}/${sv.res.score}, coins ${cl.res.coins}/${sv.res.coins}, steer inputs ${steers})${diverge >= 0 ? ' first divergence at frame ' + diverge : ''}`)
   if (c.name.startsWith('Gravity')) ok(steers > 0, 'Gravity run actually recorded steer inputs')
   if (c.name.startsWith('Diamond')) ok(cl.res.diamonds === 1 && cl.res.coins >= C.DIAMOND_COIN_PAYOUT - 1000 && cl.res.coins < C.DIAMOND_COIN_PAYOUT + 1000, `Diamond credited once (${cl.res.coins} raw coins)`)
+}
+
+// Admin-configured Diamond payout: client sim and server replay must stay identical and credit exactly the configured amount
+for (const payout of [12345, 0]) {
+  const plan = [{ frame: 40, orb: 'diamond' }, { frame: 60, orb: 'lava' }]
+  const cl = sim(ClientGame, clientSeed, clientClock, 5150, 4, plan, null, null, payout)
+  const sv = sim(ServerGame, serverSeed, serverClock, 5150, 4, plan, cl.inputs, cl.frames, payout)
+  const base = sim(ServerGame, serverSeed, serverClock, 5150, 4, plan, cl.inputs, cl.frames)
+  let diverge = -1
+  for (let f = 0; f < cl.hist.length; f++) if (cl.hist[f].some((v, j) => v !== sv.hist[f]?.[j]) || !(f in sv.hist)) { diverge = f; break }
+  ok(diverge < 0 && cl.res.coins === sv.res.coins && cl.res.score === sv.res.score, `custom Diamond payout ${payout}: client sim == server replay (coins ${cl.res.coins}/${sv.res.coins}${diverge >= 0 ? ', diverges at frame ' + diverge : ''})`)
+  // payout 0: remaining coins come from the plan's other orbs only (and are floored at 0 by the game), so just assert no Diamond coins
+  ok((payout > 0 ? cl.res.coins === base.res.coins - C.DIAMOND_COIN_PAYOUT + payout : cl.res.coins < 1000) && cl.res.diamonds === 1, `payout ${payout} credited exactly (${cl.res.coins} raw coins vs default run ${base.res.coins})`)
 }
 
 // Mythic visual: the display timer must not change the simulation

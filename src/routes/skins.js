@@ -2,6 +2,7 @@ import express from 'express'
 import { Skin } from '../models/Skin.js'
 import { User } from '../models/User.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadById } from '../admin/adminAuditLog.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 import { claimPaymentAndGrant } from '../models/LsvpPayment.js'
 import { verifyLsvpPayment } from '../solana/paymentVerification.js'
@@ -78,7 +79,7 @@ export function createSkinsRouter(jwtSecret, sessions) {
    * Admin only — add a new Spoon Skin to the catalog.
    * Body: { name, description?, price, rarity, image, spriteKey, enabled? }
    */
-  router.post('/', auth, requireAdmin, async (req, res) => {
+  router.post('/', auth, requireAdmin, auditAdmin('skin_create'), async (req, res) => {
     try {
       const { name, description, price, rarity, image, spriteKey, enabled } = req.body ?? {}
 
@@ -174,8 +175,8 @@ export function createSkinsRouter(jwtSecret, sessions) {
     }
   }
 
-  router.put('/admin/:id', auth, requireAdmin, handleUpdateSkin)
-  router.put('/:id', auth, requireAdmin, handleUpdateSkin)
+  router.put('/admin/:id', auth, requireAdmin, auditAdmin('skin_update', { before: loadById(Skin) }), handleUpdateSkin)
+  router.put('/:id', auth, requireAdmin, auditAdmin('skin_update', { before: loadById(Skin) }), handleUpdateSkin)
 
   /**
    * PATCH /api/skins/:id/enabled (or /admin/:id/enabled)
@@ -195,8 +196,8 @@ export function createSkinsRouter(jwtSecret, sessions) {
     }
   }
 
-  router.patch('/admin/:id/enabled', auth, requireAdmin, handleToggleSkinEnabled)
-  router.patch('/:id/enabled', auth, requireAdmin, handleToggleSkinEnabled)
+  router.patch('/admin/:id/enabled', auth, requireAdmin, auditAdmin('skin_toggle_enabled', { before: loadById(Skin) }), handleToggleSkinEnabled)
+  router.patch('/:id/enabled', auth, requireAdmin, auditAdmin('skin_toggle_enabled', { before: loadById(Skin) }), handleToggleSkinEnabled)
 
   /**
    * DELETE /api/skins/:id (or /admin/:id)
@@ -219,8 +220,8 @@ export function createSkinsRouter(jwtSecret, sessions) {
     }
   }
 
-  router.delete('/admin/:id', auth, requireAdmin, handleDeleteSkin)
-  router.delete('/:id', auth, requireAdmin, handleDeleteSkin)
+  router.delete('/admin/:id', auth, requireAdmin, auditAdmin('skin_delete', { before: loadById(Skin) }), handleDeleteSkin)
+  router.delete('/:id', auth, requireAdmin, auditAdmin('skin_delete', { before: loadById(Skin) }), handleDeleteSkin)
 
   /**
    * GET /api/skins/me/owned

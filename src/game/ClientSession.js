@@ -10,6 +10,7 @@ import {
   RUN_TOKEN_MAX_MS,
   RUN_REPORT_SAFETY_MARGIN,
   RUN_START_REFUND_WINDOW_MS,
+  DIAMOND_COIN_PAYOUT,
 } from './constants.js'
 import { Score } from '../models/Score.js'
 import { RunResult } from '../models/RunResult.js'
@@ -20,9 +21,10 @@ import { SeasonScore } from '../models/SeasonScore.js'
 import { Season } from '../models/Season.js'
 import { getActiveSeason } from './seasonManager.js'
 import { GameLogic, createGameStateMessage } from './GameLogic.js'
-import { replayRun } from './ReplayEngine.js'
+import { replayRunAsync } from './replayRunner.js'
 import { deriveArtifactPerksForUser } from './artifactPerks.js'
 import { getArenaRewardMultipliers, getArenaRareOrbChances } from '../models/ArenaStageConfig.js'
+import { getEffectiveRewardCaps } from '../models/RewardCapsConfig.js'
 import { XpHistory } from '../models/XpHistory.js'
 import { settleUserEnergy, consumeEnergyForRun, refundEnergyForFailedStart } from './EnergyService.js'
 import { checkRestartRateLimit } from './RateLimiter.js'
@@ -33,6 +35,25 @@ import {
   RESTART_MIN_GAP_MS_UNLIMITED, RESTART_WINDOW_MS_UNLIMITED, RESTART_MAX_PER_WINDOW_UNLIMITED,
 } from './constants.js'
 import { evaluateAndAwardBadgesForUser } from '../routes/badges.js'
+
+// Optional step timing for the run-report path (set RUN_TIMING=1 in the environment to enable).
+// Logs one line per finished run, e.g. "[run-timing] user=… total=412ms | lookup=40 replay=180 …".
+// Costs nothing when disabled.
+function makeRunTimer(userId) {
+  if (process.env.RUN_TIMING !== '1') return () => {}
+  const start = Date.now()
+  let last = start
+  const steps = []
+  return (label) => {
+    const t = Date.now()
+    if (label === 'end') {
+      console.log(`[run-timing] user=${userId} total=${t - start}ms | ${steps.join(' ')}`)
+      return
+    }
+    steps.push(`${label}=${t - last}`)
+    last = t
+  }
+}
 
 // Anti-cheat clamp for a single reported number — never trust a client value
 // outright; fold anything negative/NaN/infinite to 0 and cap at the run's
@@ -257,12 +278,24 @@ export class ClientSession {
     return best
   }
 
-  start() {
-    if (!this.timer) {
-      this.timer = setInterval(() => {
-        void this.tick()
-      }, TICK_MS)
+  _syncTickTimer() {
+    if (this.isTutorial) {
+      if (!this.timer) {
+        this.timer = setInterval(() => {
+          void this.tick()
+        }, TICK_MS)
+      }
+    } else if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
     }
+  }
+
+  start() {
+    // P2: the 60 Hz tick only does work for the "How to Play" tutorial
+    // (tick() returns immediately for real runs), so the timer is only
+    // armed while a tutorial run is active. See _syncTickTimer().
+    this._syncTickTimer()
 
     this.started = true
 
@@ -509,6 +542,7 @@ export class ClientSession {
     if (typeof message.isMobile === 'boolean') this.game.setPlatform(message.isMobile)
     this.isTutorial = isTutorial
     this.tutorialPaused = false
+    this._syncTickTimer()
     this.game.reset()
     // Real-session tutorial "forced orb" round (see GameLogic's
     // setTutorialForceOrb/_updateTutorialForcedOrb) — client sets this
@@ -546,10 +580,14 @@ export class ClientSession {
     // this only fires within a short window, not for any abandoned run.
     this._refundEnergyIfEarly(this._activeRun, 'superseded_by_new_restart')
 
-    const [rewardMultipliers, rareOrbChances] = await Promise.all([
+    const [rewardMultipliers, rareOrbChances, rewardCaps] = await Promise.all([
       getArenaRewardMultipliers(),
       getArenaRareOrbChances(),
+      getEffectiveRewardCaps(),
     ])
+    // Admin-configured Diamond Orb payout / per-run coin cap, snapshotted for this run exactly
+    // like the stage multiplier (so an admin edit never changes an already-started run).
+    this.game.setDiamondCoinPayout?.(rewardCaps.diamondCoinPayout)
     const currentStage = this.game.arenaStage || 1
     const stageMultiplier = rewardMultipliers[String(currentStage)] ?? 1
     const rareChance = rareOrbChances[String(currentStage)] ?? 0
@@ -562,6 +600,8 @@ export class ClientSession {
       isTutorial,
       lavaCoinMultiplier: stageMultiplier,
       stageMultipliers: { lavaCoinMultiplier: stageMultiplier, rareOrbChance: rareChance },
+      diamondCoinPayout: rewardCaps.diamondCoinPayout,
+      maxCoinsPerRun: rewardCaps.maxCoinsPerRun,
       // Snapshotted at restart time so the eventual replay simulates under
       // the SAME arena stage/pacing this run was actually played under,
       // even if the player switches stages or admin retunes settings before this run ends.
@@ -590,6 +630,7 @@ export class ClientSession {
       artifactPerks,
       arenaStage: currentStage,
       stageMultipliers: this._activeRun.stageMultipliers,
+      diamondCoinPayout: this._activeRun.diamondCoinPayout,
     })
 
     // If the socket isn't actually open right now, that run:token send
@@ -650,6 +691,7 @@ export class ClientSession {
    */
   async _handleRunReport(message) {
     const token = String(message.runToken || '')
+    const mark = makeRunTimer(this.user.id)
 
     if (!token) {
       recordAntiCheatAlert({ userId: this.user.id, ip: this.ip, type: 'invalid_or_expired_token' })
@@ -664,6 +706,7 @@ export class ClientSession {
     // logic). A committed round is never re-settled; its saved numbers are
     // just re-sent.
     const existingRound = await RunResult.findOne({ roundId: token, userId: this.user.id })
+    mark('lookup')
     if (existingRound?.status === 'committed') {
       this.send('run:validated', {
         score: existingRound.score,
@@ -673,6 +716,9 @@ export class ClientSession {
         roundId: existingRound.roundId,
         arenaStage: existingRound.arenaStage,
         arenaBest: await this.getArenaBest(existingRound.arenaStage),
+        lavaCoinMultiplier: existingRound.lavaCoinMultiplier ?? 1,
+        maxCombo: existingRound.maxCombo ?? 0,
+        survivalMs: existingRound.survivalMs ?? 0,
       })
       return
     }
@@ -752,6 +798,7 @@ export class ClientSession {
       // and raw launch magnitude, both outside what a real human/device can
       // produce. See game/inputPlausibility.js for the full reasoning.
       const plausibility = analyzeInputPlausibility({ inputs, frames })
+      mark('plausibility')
       if (plausibility.rejectReason) {
         console.warn('RUN REPORT REJECTED — ' + plausibility.rejectReason, {
           userId: this.user.id,
@@ -798,15 +845,17 @@ export class ClientSession {
         return
       }
 
-      const replayResult = replayRun({
+      const replayResult = await replayRunAsync({
         seed: run.seed,
         frames,
         inputs,
         arenaStage: run.arenaStage,
         artifactPerks: run.artifactPerks,
         stageMultipliers: run.stageMultipliers,
+        diamondCoinPayout: run.diamondCoinPayout,
       })
 
+      mark('replay')
       if (replayResult.crashed) {
         // Fail CLOSED, not open — never fall back to trusting the client's
         // self-reported numbers just because the replay itself hit a bug or a
@@ -841,6 +890,14 @@ export class ClientSession {
       // just a changed total wallet balance with no breakdown.
       lavaCoinMultiplier = run.lavaCoinMultiplier ?? 1
       coinsEarned = Math.round(rawCoins * lavaCoinMultiplier)
+      // Admin-configured hard cap on coins credited for one run (RewardCapsConfig.maxCoinsPerRun).
+      if (Number.isFinite(run.maxCoinsPerRun) && coinsEarned > run.maxCoinsPerRun) {
+        recordAntiCheatAlert({
+          userId: this.user.id, ip: this.ip, type: 'max_coins_per_run_clamped',
+          detail: { roundId: token, coinsEarned, maxCoinsPerRun: run.maxCoinsPerRun, rawCoins },
+        })
+        coinsEarned = Math.round(run.maxCoinsPerRun)
+      }
       // 15 Oct 2026 checklist review, bug 5: server-replayed, never
       // client-claimed — see badges.js, which checks badge claims against
       // these persisted-per-round values instead of trusting the browser.
@@ -864,7 +921,12 @@ export class ClientSession {
       // the forged numbers themselves are already inert.
       // NOTE: reportedCoins from client is raw game.coins before stage multiplier,
       // so we compare it against rawCoins (authoritative replayed coins before multiplier).
-      const reportedCoins = Number(message.coinsEarned)
+      // The client's local sim pays the built-in Diamond amount; when the admin changed it, expect
+      // the replay to differ by exactly that difference (so a config change is not logged as cheating).
+      const diamondConfigDelta = (replayResult.diamondPayouts || 0) > 0 && Number.isFinite(run.diamondCoinPayout)
+        ? run.diamondCoinPayout - DIAMOND_COIN_PAYOUT
+        : 0
+      const reportedCoins = Number(message.coinsEarned) + diamondConfigDelta
       const reportedJackpotTokens = Number(message.jackpotTokensCollected)
       const reportedScore = Number(message.score)
       if (
@@ -884,6 +946,9 @@ export class ClientSession {
           detail: {
             reported: { coins: reportedCoins, jackpotTokens: reportedJackpotTokens, score: reportedScore },
             replayed: { coins: rawCoins, jackpotTokens: jackpotTokensCollected, score },
+            // Context for diagnosing a real mismatch (which arena, how long, how many inputs).
+            arenaStage: run.arenaStage, frames: frames.length, inputs: inputs.length,
+            framesReplayed: replayResult.framesReplayed,
           },
         })
       }
@@ -894,17 +959,22 @@ export class ClientSession {
       // hashInputPattern's doc comment in inputPlausibility.js).
       inputPatternHash = hashInputPattern(inputs)
       if (inputPatternHash) {
-        const duplicateRun = await RunResult.findOne({
+        // Informational only (never blocks crediting), so it runs in the background instead of
+        // adding a database round trip to the confirmation path. The current round is excluded
+        // explicitly because it may be committed by the time this query executes.
+        RunResult.findOne({
           userId: this.user.id,
           status: 'committed',
           inputPatternHash,
-        }).select('roundId').sort({ createdAt: -1 })
-        if (duplicateRun) {
-          recordAntiCheatAlert({
-            userId: this.user.id, ip: this.ip, type: 'duplicate_input_pattern',
-            detail: { matchedRoundId: duplicateRun.roundId },
-          })
-        }
+          roundId: { $ne: token },
+        }).select('roundId').sort({ createdAt: -1 }).then((duplicateRun) => {
+          if (duplicateRun) {
+            recordAntiCheatAlert({
+              userId: this.user.id, ip: this.ip, type: 'duplicate_input_pattern',
+              detail: { matchedRoundId: duplicateRun.roundId },
+            })
+          }
+        }).catch((err) => console.error('duplicate input pattern check failed:', err?.message))
       }
     }
 
@@ -915,6 +985,9 @@ export class ClientSession {
     // a NEW game:restart racing in concurrently (a fresh `this.game.reset()`,
     // a fresh `this._activeRun`) cannot corrupt or overwrite a round that's
     // still being saved.
+    // Started now, in parallel with settlement (it's only a read); the current round's own score is
+    // folded in with Math.max below since this query may run before the round is committed.
+    const arenaBestPromise = this.getArenaBest(arenaStage).catch(() => 0)
     let round
     try {
       round = await this._settleRound(
@@ -946,24 +1019,7 @@ export class ClientSession {
       return
     }
 
-    // Evaluate and award newly qualified server-authoritative badges
-    let newBadges = []
-    try {
-      newBadges = await evaluateAndAwardBadgesForUser(this.user.id, {
-        survivalMs,
-        maxCombo,
-        jackpotOrbCollected,
-        mythicOrbCollected,
-      })
-    } catch (badgeErr) {
-      console.error('Error awarding badges at round settlement:', badgeErr)
-    }
-
-    if (newBadges.length > 0) {
-      this.send('badges:awarded', {
-        newBadges,
-      })
-    }
+    mark('settle')
 
     // Keep this session's in-memory wallet/best-score in sync with what was
     // actually just persisted (same reasoning as the old saveCoins()
@@ -973,6 +1029,18 @@ export class ClientSession {
     if (Number.isFinite(round.totalCoinsAfter)) this.game.setTotalCoins(round.totalCoinsAfter)
     this.game.bestScore = Math.max(this.game.bestScore, round.bestScoreAfter ?? score)
 
+    const arenaBest = Math.max(await arenaBestPromise, score)
+
+    // CONFIRM FIRST. Everything the player needs to see their result (score, coins, tokens, XP,
+    // wallet) is already committed at this point, so send it immediately. Leaderboard refresh and
+    // badge evaluation are non-essential and used to run (and be awaited) before this message,
+    // which is most of what made "Confirming your results" take seconds. They follow below and
+    // reach the client as their own messages (leaderboard:data, badges:awarded).
+    //
+    // Wallet sync rides on run:validated itself instead of a trailing sendState() call — a full
+    // sendState() here used to clobber the client's hud.gameOver:true (the Game Over modal would
+    // flash and vanish). `roundId` lets the client show a stable reference for this result and is
+    // exactly what a resubmitted report is matched against above.
     this.send('jackpot_tokens:awarded', {
       tokensEarned: jackpotTokensCollected,
       jackpotTokens: round.jackpotTokensAfter ?? jackpotTokensCollected,
@@ -981,21 +1049,6 @@ export class ClientSession {
       xpEarned,
       totalXp: round.totalXpAfter ?? xpEarned,
     })
-
-    await this.sendLeaderboard()
-
-    // Wallet sync now rides on run:validated itself instead of a
-    // trailing sendState() call — see the old saveCoins() comment on why
-    // this.game.totalCoins needs to be kept in sync with the DB. A full
-    // sendState() here used to re-send this session's own idle GameLogic
-    // instance's hud (gameOver always stale false for a real run, since
-    // replay — not this instance — is what actually plays it out), which
-    // clobbered the client's correct hud.gameOver:true a moment after it
-    // was set: the Game Over modal would flash and immediately disappear.
-    //
-    // `roundId` lets the client show a stable reference for this result
-    // (pending/confirmed/rejected — see GameOverlay.jsx) and is exactly
-    // what a resubmitted report is matched against above.
     this.send('run:validated', {
       score, coinsEarned, jackpotTokensCollected,
       totalCoins: round.totalCoinsAfter ?? this.game.totalCoins,
@@ -1003,8 +1056,32 @@ export class ClientSession {
       // Best confirmed score in the arena this run was played in (the run's
       // own stage snapshot), shown on the end-of-run screen.
       arenaStage,
-      arenaBest: await this.getArenaBest(arenaStage),
-      newBadges,
+      arenaBest,
+      // Server-replayed facts for the Game Over breakdown (never client-claimed).
+      lavaCoinMultiplier: lavaCoinMultiplier ?? 1,
+      maxCombo: maxCombo ?? 0,
+      survivalMs: survivalMs ?? 0,
+      newBadges: [],
+    })
+    mark('sent')
+
+    // ---- Background follow-ups (never delay or fail the confirmation above) ----
+    Promise.allSettled([
+      evaluateAndAwardBadgesForUser(this.user.id, {
+        survivalMs,
+        maxCombo,
+        jackpotOrbCollected,
+        mythicOrbCollected,
+      }).then((newBadges) => {
+        if (newBadges.length > 0) this.send('badges:awarded', { newBadges })
+      }),
+      this.sendLeaderboard(),
+    ]).then((results) => {
+      for (const r of results) {
+        if (r.status === 'rejected') console.error('Post-run follow-up failed:', r.reason)
+      }
+      mark('followups')
+      mark('end')
     })
   }
 
@@ -1155,7 +1232,10 @@ export class ClientSession {
       const bestScoreAfter = await this.saveBestScore(score)
       round.bestScoreSaved = true
       round.bestScoreAfter = bestScoreAfter
-      await RunResult.updateOne({ _id: round._id }, { bestScoreSaved: true, bestScoreAfter })
+      // One write for both markers (was two sequential updateOne calls).
+      round.status = 'committed'
+      await RunResult.updateOne({ _id: round._id }, { bestScoreSaved: true, bestScoreAfter, status: 'committed' })
+      return round
     }
 
     round.status = 'committed'
@@ -1524,26 +1604,32 @@ async saveBestScore(score) {
   // stored value only ever ends up as the true max of everything applied.
   // Heal any all-time/season drift first (see getBestScore()) so the value
   // returned below can never be lower than the season best.
-  await this.getBestScore()
+  // Season score is saved in parallel with the all-time record (they are independent writes).
+  // The old version first called getBestScore() (several queries) just to heal drift between the
+  // all-time and season records; that heal now happens only if the writes below show drift.
+  const [updated, seasonRow] = await Promise.all([
+    Score.findOneAndUpdate(
+      { userId: this.user.id },
+      {
+        $max: { bestScore: currentScore },
+        $setOnInsert: { userId: this.user.id, username: this.user.username },
+      },
+      { upsert: true, new: true }
+    ),
+    this._saveSeasonScore(currentScore),
+  ])
 
-  const updated = await Score.findOneAndUpdate(
-    { userId: this.user.id },
-    {
-      $max: { bestScore: currentScore },
-      $setOnInsert: { userId: this.user.id, username: this.user.username },
-    },
-    { upsert: true, new: true }
-  )
+  let best = updated?.bestScore ?? currentScore
+  const seasonBest = seasonRow?.bestScore ?? 0
+  if (seasonBest > best) {
+    // A season best is a score this player really achieved, so the all-time best can never be
+    // lower — reconcile (same invariant getBestScore() enforces on connect).
+    best = seasonBest
+    await Score.updateOne({ userId: this.user.id }, { $max: { bestScore: seasonBest } })
+  }
 
-  this.game.bestScore = updated?.bestScore ?? currentScore
-
-  // Seasonal Leaderboard — a completely separate, season-scoped record
-  // (see models/SeasonScore.js) from the all-time personal best above.
-  // Only written if a season is currently active; if none is, the run
-  // simply doesn't count toward any leaderboard (nothing to opt into).
-  await this._saveSeasonScore(currentScore)
-
-  return updated?.bestScore ?? currentScore
+  this.game.bestScore = best
+  return best
 }
 
 /**
@@ -1558,9 +1644,9 @@ async saveBestScore(score) {
 async _saveSeasonScore(currentScore) {
   try {
     const season = await getActiveSeason()
-    if (!season) return
+    if (!season) return null
 
-    await SeasonScore.findOneAndUpdate(
+    return await SeasonScore.findOneAndUpdate(
       { seasonId: season._id, userId: this.user.id },
       {
         $max: { bestScore: currentScore },
@@ -1571,6 +1657,7 @@ async _saveSeasonScore(currentScore) {
     )
   } catch (error) {
     console.error('SEASON SCORE SAVE ERROR:', error)
+    return null
   }
 }
 async saveCoins() {
@@ -1590,7 +1677,9 @@ async saveCoins() {
   // live value only if there's no active-run snapshot for some reason
   // (defensive -- should not normally happen for a real, non-tutorial run).
   const stageLavaCoinMult = this._activeRun?.lavaCoinMultiplier ?? this.game.stageConfig?.lavaCoinMultiplier ?? 1
-  const coinsEarned = Math.round(this.game.coins * stageLavaCoinMult)
+  let coinsEarned = Math.round(this.game.coins * stageLavaCoinMult)
+  const runCoinCap = this._activeRun?.maxCoinsPerRun
+  if (Number.isFinite(runCoinCap) && coinsEarned > runCoinCap) coinsEarned = Math.round(runCoinCap)
 
   if (coinsEarned <= 0) return 0
 

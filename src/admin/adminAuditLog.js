@@ -73,3 +73,151 @@ export async function markAdminActionFailed(logId, errorMessage = null) {
     { $set: { status: 'failed', after: errorMessage ? { error: errorMessage } : null } }
   )
 }
+
+/* ────────────────────────────────────────────────────────────────────
+ * auditAdmin() — central Express middleware for admin mutation routes.
+ *
+ * Add it AFTER `auth, requireAdmin` on any admin write route so that every
+ * admin change lands in the audit log without each handler having to
+ * remember to log it:
+ *
+ *   router.put('/admin/:id', auth, requireAdmin,
+ *     auditAdmin('item_update', { before: loadById(Item) }),
+ *     async (req, res) => { ... })
+ *
+ * What it records (one AdminAuditLog row per request):
+ *   - admin (req.user.sub / req.user.username), action label, IP
+ *   - target player, when the route targets one (opts.target, or a
+ *     `username` in req.body / req.params)
+ *   - before: snapshot loaded BEFORE the handler runs (opts.before)
+ *   - after:  { params, request, [result] } — the sanitised request body
+ *   - status: 'applied' when the response is < 400, 'failed' otherwise
+ *     (with the error message). Failed attempts are logged too.
+ *
+ * opts.durable = true uses the "durable record before the payout" order:
+ * a 'pending' row is written (and awaited) BEFORE the handler runs, and the
+ * request is refused if that row cannot be written; it is then flipped to
+ * applied/failed once the response finishes. Use it for anything that moves
+ * money, tokens, NFTs or player balances. Mongo may be standalone, so no
+ * multi-document transaction is assumed.
+ *
+ * Secrets (passwords, tokens, keys, seeds…) are redacted from snapshots.
+ * ──────────────────────────────────────────────────────────────────── */
+
+const SENSITIVE_KEY = /pass(word)?|secret|token|private|mnemonic|seed|authorization|keypair|api[_-]?key/i
+const MAX_SNAPSHOT_CHARS = 8000
+
+function sanitizeSnapshot(value, depth = 0) {
+  if (value === null || value === undefined) return value ?? null
+  if (depth > 6) return '[depth limit]'
+  if (typeof value === 'bigint') return value.toString()
+  if (Array.isArray(value)) return value.slice(0, 50).map((v) => sanitizeSnapshot(v, depth + 1))
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'object') {
+    if (typeof value.toObject === 'function') return sanitizeSnapshot(value.toObject(), depth + 1)
+    if (value._bsontype === 'ObjectId' || typeof value.toHexString === 'function') return String(value)
+    const out = {}
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : sanitizeSnapshot(v, depth + 1)
+    }
+    return out
+  }
+  if (typeof value === 'string' && value.length > 500) return `${value.slice(0, 500)}…`
+  return value
+}
+
+function capSnapshot(value) {
+  const clean = sanitizeSnapshot(value)
+  if (clean === null || clean === undefined) return null
+  try {
+    const json = JSON.stringify(clean)
+    if (json.length <= MAX_SNAPSHOT_CHARS) return clean
+    return { truncated: true, preview: json.slice(0, 2000) }
+  } catch {
+    return { unserialisable: true }
+  }
+}
+
+/** before-loader: the document with req.params[param] (default 'id'). */
+export function loadById(Model, param = 'id') {
+  return async (req) => Model.findById(req.params[param]).lean()
+}
+
+/** before-loader for singleton config helpers such as getEnergyConfig(). */
+export function loadConfig(getter) {
+  return async () => {
+    const doc = await getter()
+    return typeof doc?.toObject === 'function' ? doc.toObject() : doc
+  }
+}
+
+export function auditAdmin(action, opts = {}) {
+  const { before: loadBefore = null, target = null, durable = false } = opts
+
+  return async (req, res, next) => {
+    const admin = req.user ?? {}
+    const route = `${req.method} ${req.baseUrl ?? ''}${req.path ?? ''}`
+
+    // Resolve target player + before-snapshot up front (best effort — a
+    // failure here must never block the real action, except for durable
+    // actions below where the audit row itself is mandatory).
+    let targetInfo = {}
+    try {
+      targetInfo = (typeof target === 'function' ? await target(req) : null) ?? {}
+    } catch { /* ignore */ }
+    const targetUsername =
+      targetInfo.targetUsername ?? (typeof req.body?.username === 'string' ? req.body.username.trim() : null) ?? (req.params?.username ?? null)
+    const targetUserId = targetInfo.targetUserId ?? null
+
+    let before = null
+    if (loadBefore) {
+      try { before = capSnapshot(await loadBefore(req)) } catch { before = null }
+    }
+
+    const request = capSnapshot({ params: req.params, body: req.body })
+    const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim()) || route
+
+    let pendingRow = null
+    if (durable) {
+      try {
+        pendingRow = await createPendingAdminAction({
+          adminId: admin.sub, adminUsername: admin.username, action,
+          targetUserId, targetUsername: targetUsername || null,
+          before, reason, ip: req.ip,
+        })
+      } catch (err) {
+        console.error('[auditAdmin] could not write durable audit row — refusing the action:', err?.message)
+        return res.status(500).json({ message: 'Audit log unavailable — action refused' })
+      }
+    }
+
+    // Capture the response so we can record success/failure + error text.
+    let responseBody
+    const originalJson = res.json.bind(res)
+    res.json = (body) => { responseBody = body; return originalJson(body) }
+
+    res.on('finish', () => {
+      const ok = res.statusCode < 400
+      const after = ok
+        ? { request }
+        : { request, error: responseBody?.message ?? `HTTP ${res.statusCode}`, httpStatus: res.statusCode }
+
+      if (pendingRow) {
+        AdminAuditLog.updateOne(
+          { _id: pendingRow._id },
+          { $set: { after, status: ok ? 'applied' : 'failed' } },
+        ).catch((err) => console.error('[auditAdmin] failed to finalise audit row:', err?.message))
+        return
+      }
+
+      AdminAuditLog.create({
+        adminId: admin.sub, adminUsername: admin.username, action,
+        targetUserId, targetUsername: targetUsername || null,
+        before, after, reason, ip: req.ip,
+        status: ok ? 'applied' : 'failed',
+      }).catch((err) => console.error('[auditAdmin] failed to persist audit row:', err?.message))
+    })
+
+    next()
+  }
+}

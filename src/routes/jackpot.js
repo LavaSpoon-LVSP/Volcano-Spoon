@@ -16,6 +16,7 @@ import { transferNftFromAdmin } from '../solana/nftService.js'
 import { drawJackpotNftReward } from '../game/jackpotNftReward.js'
 import { explorerTxUrl } from '../config/solana.js'
 import { requireAuth, requireAdmin } from '../middleware/requireAuth.js'
+import { auditAdmin, loadConfig } from '../admin/adminAuditLog.js'
 import { requirePayoutsNotPaused } from '../models/PayoutConfig.js'
 import { isWholeTokenAmount } from '../utils/lsvpPricing.js'
 
@@ -755,7 +756,7 @@ export function createJackpotRouter(jwtSecret, sessions) {
    * per-collection from the Blockchain admin tab (NftCollection.jackpotEligible
    * / jackpotRewardQuantity).
    */
-  router.put('/admin/config', auth, requireAdmin, async (req, res) => {
+  router.put('/admin/config', auth, requireAdmin, auditAdmin('config_jackpot_update', { before: loadConfig(getJackpotConfig) }), async (req, res) => {
     try {
       const { lsvpCost, lavaCoin, lsvp, nft, cosmetic } = req.body ?? {}
 
@@ -920,7 +921,7 @@ export function createJackpotRouter(jwtSecret, sessions) {
    * reserve check can only ever hold a payout back or let it through once
    * funds genuinely cover it — it never auto-pays without this action.
    */
-  router.post('/admin/held-payouts/:transactionId/retry', auth, requireAdmin, async (req, res) => {
+  router.post('/admin/held-payouts/:transactionId/retry', auth, requireAdmin, auditAdmin('jackpot_held_payout_retry', { durable: true }), async (req, res) => {
     const { transactionId } = req.params
     try {
       const transaction = await JackpotTransaction.findOneAndUpdate(
@@ -980,7 +981,7 @@ export function createJackpotRouter(jwtSecret, sessions) {
    * be retried or claimed again — this is a one-way door, unlike
    * 'held_for_review'.
    */
-  router.post('/admin/held-payouts/:transactionId/cancel', auth, requireAdmin, async (req, res) => {
+  router.post('/admin/held-payouts/:transactionId/cancel', auth, requireAdmin, auditAdmin('jackpot_held_payout_cancel', { durable: true }), async (req, res) => {
     const { transactionId } = req.params
     const reason = (req.body?.reason ?? '').toString().trim()
     if (!reason) {
